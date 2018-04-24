@@ -48,8 +48,12 @@ class Complex_Test < Test::Unit::TestCase
   end
 
   def test_hash
-    assert_kind_of(Integer, Complex(1,2).hash)
-    assert_kind_of(Integer, Complex(1.0,2.0).hash)
+    h = Complex(1,2).hash
+    assert_kind_of(Integer, h)
+    assert_nothing_raised {h.to_s}
+    h = Complex(1.0,2.0).hash
+    assert_kind_of(Integer, h)
+    assert_nothing_raised {h.to_s}
 
     h = {}
     h[Complex(0)] = 0
@@ -742,6 +746,27 @@ class Complex_Test < Test::Unit::TestCase
 
   end
 
+  def test_Complex_without_exception
+    assert_nothing_raised(ArgumentError){
+      assert_equal(nil, Complex('5x', exception: false))
+    }
+    assert_nothing_raised(ArgumentError){
+      assert_equal(nil, Complex(Object.new, exception: false))
+    }
+    assert_nothing_raised(ArgumentError){
+      assert_equal(nil, Complex(1, Object.new, exception: false))
+    }
+
+    o = Object.new
+    def o.to_c; raise; end
+    assert_nothing_raised(ArgumentError){
+      assert_equal(nil, Complex(o, exception: false))
+    }
+    assert_nothing_raised(ArgumentError){
+      assert_equal(nil, Complex(1, o, exception: false))
+    }
+  end
+
   def test_respond
     c = Complex(1,1)
     assert_not_respond_to(c, :%)
@@ -954,4 +979,30 @@ class Complex_Test < Test::Unit::TestCase
   def test_known_bug
   end
 
+  def test_canonicalize_internal
+    obj = Class.new(Numeric) do
+      attr_accessor :real
+      alias real? real
+    end.new
+    obj.real = true
+    c = Complex.rect(obj, 1);
+    obj.real = false
+    c = c.conj
+    assert_equal(obj, c.real)
+    assert_equal(-1, c.imag)
+  end
+
+  def test_canonicalize_polar
+    obj = Class.new(Numeric) do
+      def initialize
+        @x = 2
+      end
+      def real?
+        (@x -= 1) > 0
+      end
+    end.new
+    assert_raise(TypeError) do
+      Complex.polar(1, obj)
+    end
+  end
 end

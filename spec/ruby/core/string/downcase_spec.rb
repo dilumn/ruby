@@ -1,6 +1,6 @@
 # -*- encoding: utf-8 -*-
-require File.expand_path('../../../spec_helper', __FILE__)
-require File.expand_path('../fixtures/classes.rb', __FILE__)
+require_relative '../../spec_helper'
+require_relative 'fixtures/classes'
 
 describe "String#downcase" do
   it "returns a copy of self with all uppercase letters downcased" do
@@ -60,9 +60,9 @@ describe "String#downcase!" do
     a.should == "hello"
   end
 
-  it "raises a RuntimeError when self is frozen" do
-    lambda { "HeLlo".freeze.downcase! }.should raise_error(RuntimeError)
-    lambda { "hello".freeze.downcase! }.should raise_error(RuntimeError)
+  it "raises a #{frozen_error_class} when self is frozen" do
+    lambda { "HeLlo".freeze.downcase! }.should raise_error(frozen_error_class)
+    lambda { "hello".freeze.downcase! }.should raise_error(frozen_error_class)
   end
 
   with_feature :encoding do

@@ -142,6 +142,12 @@ rb_sym2str(VALUE sym)
 }
 #endif
 
+#ifndef ST2FIX
+# undef RB_ST2FIX
+# define RB_ST2FIX(h) LONG2FIX((long)(h))
+# define ST2FIX(h) RB_ST2FIX(h)
+#endif
+
 #ifdef vabs
 # undef vabs
 #endif
@@ -221,7 +227,9 @@ extern VALUE rb_cBigDecimal;
 #define VP_SIGN_POSITIVE_INFINITE  3 /* Positive infinite number */
 #define VP_SIGN_NEGATIVE_INFINITE -3 /* Negative infinite number */
 
-#ifdef __GNUC__
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 199901L)
+#define	FLEXIBLE_ARRAY_SIZE /* */
+#elif defined(__GNUC__) && !defined(__STRICT_ANSI__)
 #define	FLEXIBLE_ARRAY_SIZE 0
 #else
 #define	FLEXIBLE_ARRAY_SIZE 1

@@ -246,11 +246,14 @@ class TestProcess < Test::Unit::TestCase
     assert_raise(ArgumentError) do
       system(RUBY, '-e', 'exit',  'rlimit_bogus'.to_sym => 123)
     end
-    assert_separately([],<<-"end;") # [ruby-core:82033] [Bug #13744]
+    assert_separately([],"#{<<-"begin;"}\n#{<<~'end;'}")
+    BUG = "[ruby-core:82033] [Bug #13744]"
+    RUBY = "#{RUBY}"
+    begin;
       assert(system("#{RUBY}", "-e",
                  "exit([3600,3600] == Process.getrlimit(:CPU))",
-             'rlimit_cpu'.to_sym => 3600))
-      assert_raise(ArgumentError) do
+             'rlimit_cpu'.to_sym => 3600), BUG)
+      assert_raise(ArgumentError, BUG) do
         system("#{RUBY}", '-e', 'exit',  :rlimit_bogus => 123)
       end
     end;
@@ -676,14 +679,17 @@ class TestProcess < Test::Unit::TestCase
         return
       end
       IO.popen([RUBY, '-e', <<-'EOS']) {|io|
+        STDOUT.sync = true
         trap(:USR1) { print "trap\n" }
+        puts "start"
         system("cat", :in => "fifo")
       EOS
-        sleep 1
+        assert_equal("start\n", io.gets)
+        sleep 0.2 # wait for the child to stop at opening "fifo"
         Process.kill(:USR1, io.pid)
-        sleep 1
+        assert_equal("trap\n", io.readpartial(8))
         File.write("fifo", "ok\n")
-        assert_equal("trap\nok\n", io.read)
+        assert_equal("ok\n", io.read)
       }
     }
   end unless windows? # does not support fifo
@@ -1512,8 +1518,16 @@ class TestProcess < Test::Unit::TestCase
   end
 
   def test_maxgroups
-    assert_kind_of(Integer, Process.maxgroups)
+    max = Process.maxgroups
   rescue NotImplementedError
+  else
+    assert_kind_of(Integer, max)
+    assert_predicate(max, :positive?)
+    skip "not limited to NGROUPS_MAX" if /darwin/ =~ RUBY_PLATFORM
+    gs = Process.groups
+    assert_operator(gs.size, :<=, max)
+    gs[0] ||= 0
+    assert_raise(ArgumentError) {Process.groups = gs * (max / gs.size + 1)}
   end
 
   def test_geteuid
@@ -1575,7 +1589,10 @@ class TestProcess < Test::Unit::TestCase
     pid = nil
     IO.pipe do |r, w|
       pid = fork { r.read(1); exit }
-      Thread.start { raise }
+      Thread.start {
+        Thread.current.report_on_exception = false
+        raise
+      }
       w.puts
     end
     Process.wait pid
@@ -1632,6 +1649,9 @@ class TestProcess < Test::Unit::TestCase
   end
 
   def test_aspawn_too_long_path
+    if /solaris/i =~ RUBY_PLATFORM && !defined?(Process::RLIMIT_NPROC)
+      skip "Too exhaustive test on platforms without Process::RLIMIT_NPROC such as Solaris 10"
+    end
     bug4315 = '[ruby-core:34833] #7904 [ruby-core:52628] #11613'
     assert_fail_too_long_path(%w"echo |", bug4315)
   end
@@ -1792,6 +1812,16 @@ class TestProcess < Test::Unit::TestCase
     end
   end
 
+  def test_popen_reopen
+    assert_separately([], "#{<<~"begin;"}\n#{<<~'end;'}")
+    begin;
+      io = File.open(IO::NULL)
+      io2 = io.dup
+      IO.popen("echo") {|f| io.reopen(f)}
+      io.reopen(io2)
+    end;
+  end
+
   def test_execopts_new_pgroup
     return unless windows?
 
@@ -1835,7 +1865,12 @@ class TestProcess < Test::Unit::TestCase
     skip "Process.groups not implemented on Windows platform" if windows?
     feature6975 = '[ruby-core:47414]'
 
-    [30000, *Process.groups.map {|g| g = Etc.getgrgid(g); [g.name, g.gid]}].each do |group, gid|
+    groups = Process.groups.map do |g|
+      g = Etc.getgrgid(g) rescue next
+      [g.name, g.gid]
+    end
+    groups.compact!
+    [30000, *groups].each do |group, gid|
       assert_nothing_raised(feature6975) do
         begin
           system(*TRUECOMMAND, gid: group)
@@ -2269,7 +2304,7 @@ EOS
   def test_threading_works_after_exec_fail
     r, w = IO.pipe
     pid = status = nil
-    Timeout.timeout(30) do
+    Timeout.timeout(90) do
       pid = fork do
         r.close
         begin
@@ -2277,11 +2312,12 @@ EOS
         rescue SystemCallError
           w.syswrite("exec failed\n")
         end
+        q = Queue.new
         run = true
-        th1 = Thread.new { i = 0; i += 1 while run; i }
-        th2 = Thread.new { j = 0; j += 1 while run && Thread.pass.nil?; j }
+        th1 = Thread.new { i = 0; i += 1 while q.empty?; i }
+        th2 = Thread.new { j = 0; j += 1 while q.empty? && Thread.pass.nil?; j }
         sleep 0.5
-        run = false
+        q << true
         w.syswrite "#{th1.value} #{th2.value}\n"
       end
       w.close
@@ -2346,5 +2382,10 @@ EOS
         Process.initgroups("\0", 0)
       end
     end
+  end
+
+  def test_last_status
+    Process.wait spawn(RUBY, "-e", "exit 13")
+    assert_same(Process.last_status, $?)
   end
 end

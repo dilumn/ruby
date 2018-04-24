@@ -33,6 +33,8 @@ class TestConditionVariable < Test::Unit::TestCase
   end
 
   def test_condvar_wait_exception_handling
+    skip "MJIT thread is unexpected for this test, especially with --jit-wait" if RubyVM::MJIT.enabled?
+
     # Calling wait in the only thread running should raise a ThreadError of
     # 'stopping only thread'
     mutex = Mutex.new
@@ -42,12 +44,10 @@ class TestConditionVariable < Test::Unit::TestCase
     thread = Thread.new do
       Thread.current.abort_on_exception = false
       mutex.synchronize do
-        begin
+        assert_raise(Interrupt) {
           condvar.wait(mutex)
-        rescue Exception
-          locked = mutex.locked?
-          raise
-        end
+        }
+        locked = mutex.locked?
       end
     end
 
@@ -56,7 +56,7 @@ class TestConditionVariable < Test::Unit::TestCase
     end
 
     thread.raise Interrupt, "interrupt a dead condition variable"
-    assert_raise(Interrupt) { thread.value }
+    thread.join
     assert(locked)
   end
 
@@ -219,4 +219,23 @@ INPUT
       Marshal.dump(condvar)
     end
   end
+
+  def test_condvar_fork
+    mutex = Mutex.new
+    condvar = ConditionVariable.new
+    thrs = (1..10).map do
+      Thread.new { mutex.synchronize { condvar.wait(mutex) } }
+    end
+    thrs.each { 3.times { Thread.pass } }
+    pid = fork do
+      mutex.synchronize { condvar.broadcast }
+      exit!(0)
+    end
+    _, s = Process.waitpid2(pid)
+    assert_predicate s, :success?, 'no segfault [ruby-core:86316] [Bug #14634]'
+    until thrs.empty?
+      mutex.synchronize { condvar.broadcast }
+      thrs.delete_if { |t| t.join(0.01) }
+    end
+  end if Process.respond_to?(:fork)
 end

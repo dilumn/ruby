@@ -1,6 +1,6 @@
 # -*- encoding: utf-8 -*-
-require File.expand_path('../../../spec_helper', __FILE__)
-require File.expand_path('../fixtures/classes.rb', __FILE__)
+require_relative '../../spec_helper'
+require_relative 'fixtures/classes'
 
 describe "String#capitalize" do
   it "returns a copy of self with the first character converted to uppercase and the remainder to lowercase" do
@@ -61,10 +61,10 @@ describe "String#capitalize!" do
     "H".capitalize!.should == nil
   end
 
-  it "raises a RuntimeError when self is frozen" do
+  it "raises a #{frozen_error_class} when self is frozen" do
     ["", "Hello", "hello"].each do |a|
       a.freeze
-      lambda { a.capitalize! }.should raise_error(RuntimeError)
+      lambda { a.capitalize! }.should raise_error(frozen_error_class)
     end
   end
 end

@@ -12,9 +12,9 @@
 
 **********************************************************************/
 
+#include "ruby/io.h"
 #include "internal.h"
 #include "ruby/debug.h"
-#include "ruby/io.h"
 #include "gc.h"
 #include "node.h"
 #include "vm_core.h"
@@ -205,6 +205,9 @@ imemo_name(int imemo)
 	TYPE_STR(memo);
 	TYPE_STR(ment);
 	TYPE_STR(iseq);
+	TYPE_STR(alloc);
+	TYPE_STR(ast);
+	TYPE_STR(parser_strterm);
       default:
 	return "unknown";
 #undef TYPE_STR
@@ -495,6 +498,7 @@ objspace_dump_all(int argc, VALUE *argv, VALUE os)
 void
 Init_objspace_dump(VALUE rb_mObjSpace)
 {
+#undef rb_intern
 #if 0
     rb_mObjSpace = rb_define_module("ObjectSpace"); /* let rdoc know */
 #endif

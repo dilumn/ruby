@@ -25,7 +25,9 @@ unless Gem::Dependency.new('rdoc', '>= 3.10').matching_specs.empty?
   gem 'json'
 end
 
-require 'bundler'
+if Gem::USE_BUNDLER_FOR_GEMDEPS
+  require 'bundler'
+end
 require 'minitest/autorun'
 
 require 'rubygems/deprecate'
@@ -235,7 +237,9 @@ class Gem::TestCase < MiniTest::Unit::TestCase
     @current_dir = Dir.pwd
     @fetcher     = nil
 
-    Bundler.ui                     = Bundler::UI::Silent.new
+    if Gem::USE_BUNDLER_FOR_GEMDEPS
+      Bundler.ui                     = Bundler::UI::Silent.new
+    end
     @back_ui                       = Gem::DefaultUserInteraction.ui
     @ui                            = Gem::MockGemUi.new
     # This needs to be a new instance since we call use_ui(@ui) when we want to
@@ -291,7 +295,16 @@ class Gem::TestCase < MiniTest::Unit::TestCase
 
     @orig_LOAD_PATH = $LOAD_PATH.dup
     $LOAD_PATH.map! { |s|
-      (expand_path = File.expand_path(s)) == s ? s : expand_path.untaint
+      expand_path = File.expand_path(s)
+      if expand_path != s
+        expand_path.untaint
+        if s.instance_variable_defined?(:@gem_prelude_index)
+          expand_path.instance_variable_set(:@gem_prelude_index, expand_path)
+        end
+        expand_path.freeze if s.frozen?
+        s = expand_path
+      end
+      s
     }
 
     Dir.chdir @tempdir
@@ -331,7 +344,9 @@ class Gem::TestCase < MiniTest::Unit::TestCase
     Gem.loaded_specs.clear
     Gem.clear_default_specs
     Gem::Specification.unresolved_deps.clear
-    Bundler.reset!
+    if Gem::USE_BUNDLER_FOR_GEMDEPS
+      Bundler.reset!
+    end
 
     Gem.configuration.verbose = true
     Gem.configuration.update_sources = true
@@ -482,7 +497,7 @@ class Gem::TestCase < MiniTest::Unit::TestCase
 
     gemspec = "#{name}.gemspec"
 
-    open File.join(directory, gemspec), 'w' do |io|
+    File.open File.join(directory, gemspec), 'w' do |io|
       io.write git_spec.to_ruby
     end
 
@@ -586,7 +601,7 @@ class Gem::TestCase < MiniTest::Unit::TestCase
   # Reads a Marshal file at +path+
 
   def read_cache(path)
-    open path.dup.untaint, 'rb' do |io|
+    File.open path.dup.untaint, 'rb' do |io|
       Marshal.load io.read
     end
   end
@@ -606,7 +621,7 @@ class Gem::TestCase < MiniTest::Unit::TestCase
     dir = File.dirname path
     FileUtils.mkdir_p dir unless File.directory? dir
 
-    open path, 'wb' do |io|
+    File.open path, 'wb' do |io|
       yield io if block_given?
     end
 
@@ -721,7 +736,7 @@ class Gem::TestCase < MiniTest::Unit::TestCase
     install_default_specs(*specs)
 
     specs.each do |spec|
-      open spec.loaded_from, 'w' do |io|
+      File.open spec.loaded_from, 'w' do |io|
         io.write spec.to_ruby_for_cache
       end
     end
@@ -750,6 +765,9 @@ class Gem::TestCase < MiniTest::Unit::TestCase
     old_loaded_features = $LOADED_FEATURES.dup
     yield
   ensure
+    prefix = File.dirname(__FILE__) + "/"
+    new_features = ($LOADED_FEATURES - old_loaded_features)
+    old_loaded_features.concat(new_features.select {|f| f.rindex(prefix, 0)})
     $LOADED_FEATURES.replace old_loaded_features
   end
 
@@ -1357,7 +1375,7 @@ Also, a list:
       yield specification if block_given?
     end
 
-    open File.join(directory, "#{name}.gemspec"), 'w' do |io|
+    File.open File.join(directory, "#{name}.gemspec"), 'w' do |io|
       io.write vendor_spec.to_ruby
     end
 

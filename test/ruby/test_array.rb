@@ -41,6 +41,7 @@ class TestArray < Test::Unit::TestCase
     assert_equal(2, x[2])
     assert_equal([1, 2, 3], x[1..3])
     assert_equal([1, 2, 3], x[1,3])
+    assert_equal([3, 4, 5], x[3..])
 
     x[0, 2] = 10
     assert_equal([10, 2, 3, 4, 5], x)
@@ -170,6 +171,7 @@ class TestArray < Test::Unit::TestCase
   def test_find_all_0
     assert_respond_to([], :find_all)
     assert_respond_to([], :select)       # Alias
+    assert_respond_to([], :filter)       # Alias
     assert_equal([], [].find_all{ |obj| obj == "foo"})
 
     x = ["foo", "bar", "baz", "baz", 1, 2, 3, 3, 4]
@@ -198,6 +200,8 @@ class TestArray < Test::Unit::TestCase
     assert_equal([0, 1, 2, 13, 4, 5], [0, 1, 2, 3, 4, 5].fill(3...4){|i| i+10})
     assert_equal([0, 1, 12, 13, 14, 5], [0, 1, 2, 3, 4, 5].fill(2..-2){|i| i+10})
     assert_equal([0, 1, 12, 13, 4, 5], [0, 1, 2, 3, 4, 5].fill(2...-2){|i| i+10})
+    assert_equal([0, 1, 2, 13, 14, 15], [0, 1, 2, 3, 4, 5].fill(3..){|i| i+10})
+    assert_equal([0, 1, 2, 13, 14, 15], [0, 1, 2, 3, 4, 5].fill(3...){|i| i+10})
   end
 
   # From rubicon
@@ -254,29 +258,22 @@ class TestArray < Test::Unit::TestCase
   def test_MINUS # '-'
     assert_equal(@cls[],  @cls[1] - @cls[1])
     assert_equal(@cls[1], @cls[1, 2, 3, 4, 5] - @cls[2, 3, 4, 5])
-    # Ruby 1.8 feature change
-    #assert_equal(@cls[1], @cls[1, 2, 1, 3, 1, 4, 1, 5] - @cls[2, 3, 4, 5])
     assert_equal(@cls[1, 1, 1, 1], @cls[1, 2, 1, 3, 1, 4, 1, 5] - @cls[2, 3, 4, 5])
     a = @cls[]
     1000.times { a << 1 }
     assert_equal(1000, a.length)
-    #assert_equal(@cls[1], a - @cls[2])
     assert_equal(@cls[1] * 1000, a - @cls[2])
-    #assert_equal(@cls[1],  @cls[1, 2, 1] - @cls[2])
     assert_equal(@cls[1, 1],  @cls[1, 2, 1] - @cls[2])
     assert_equal(@cls[1, 2, 3], @cls[1, 2, 3] - @cls[4, 5, 6])
   end
 
   def test_MINUS_big_array # '-'
     assert_equal(@cls[1]*64, @cls[1, 2, 3, 4, 5]*64 - @cls[2, 3, 4, 5]*64)
-    # Ruby 1.8 feature change
-    #assert_equal(@cls[1], @cls[1, 2, 1, 3, 1, 4, 1, 5]*64 - @cls[2, 3, 4, 5]*64)
     assert_equal(@cls[1, 1, 1, 1]*64, @cls[1, 2, 1, 3, 1, 4, 1, 5]*64 - @cls[2, 3, 4, 5]*64)
     a = @cls[]
     1000.times { a << 1 }
     assert_equal(1000, a.length)
-    #assert_equal(@cls[1], a - @cls[2])
-   assert_equal(@cls[1] * 1000, a - @cls[2])
+    assert_equal(@cls[1] * 1000, a - @cls[2])
   end
 
   def test_LSHIFT # '<<'
@@ -352,12 +349,11 @@ class TestArray < Test::Unit::TestCase
     assert_equal(@cls[99],  a[-2..-2])
 
     assert_equal(@cls[10, 11, 12], a[9..11])
+    assert_equal(@cls[98, 99, 100], a[97..])
     assert_equal(@cls[10, 11, 12], a[-91..-89])
+    assert_equal(@cls[98, 99, 100], a[-3..])
 
     assert_nil(a[10, -3])
-    # Ruby 1.8 feature change:
-    # Array#[size..x] returns [] instead of nil.
-    #assert_nil(a[10..7])
     assert_equal [], a[10..7]
 
     assert_raise(TypeError) {a['cat']}
@@ -413,33 +409,33 @@ class TestArray < Test::Unit::TestCase
     assert_equal(b, a[10..19] = b)
     assert_equal(@cls[*(0..9).to_a] + b + @cls[*(20..99).to_a], a)
 
-    # Ruby 1.8 feature change:
-    # assigning nil does not remove elements.
-=begin
     a = @cls[*(0..99).to_a]
     assert_equal(nil, a[0,1] = nil)
-    assert_equal(@cls[*(1..99).to_a], a)
+    assert_equal(@cls[nil] + @cls[*(1..99).to_a], a)
 
     a = @cls[*(0..99).to_a]
     assert_equal(nil, a[10,10] = nil)
-    assert_equal(@cls[*(0..9).to_a] + @cls[*(20..99).to_a], a)
+    assert_equal(@cls[*(0..9).to_a] + @cls[nil] + @cls[*(20..99).to_a], a)
 
     a = @cls[*(0..99).to_a]
     assert_equal(nil, a[-1, 1] = nil)
-    assert_equal(@cls[*(0..98).to_a], a)
+    assert_equal(@cls[*(0..98).to_a] + @cls[nil], a)
 
     a = @cls[*(0..99).to_a]
     assert_equal(nil, a[-10, 10] = nil)
-    assert_equal(@cls[*(0..89).to_a], a)
+    assert_equal(@cls[*(0..89).to_a] + @cls[nil], a)
 
     a = @cls[*(0..99).to_a]
     assert_equal(nil, a[0,1000] = nil)
-    assert_equal(@cls[] , a)
+    assert_equal(@cls[nil] , a)
 
     a = @cls[*(0..99).to_a]
     assert_equal(nil, a[10..19] = nil)
-    assert_equal(@cls[*(0..9).to_a] + @cls[*(20..99).to_a], a)
-=end
+    assert_equal(@cls[*(0..9).to_a] + @cls[nil] + @cls[*(20..99).to_a], a)
+
+    a = @cls[*(0..99).to_a]
+    assert_equal(nil, a[10..] = nil)
+    assert_equal(@cls[*(0..9).to_a] + @cls[nil], a)
 
     a = @cls[1, 2, 3]
     a[1, 0] = a
@@ -530,10 +526,9 @@ class TestArray < Test::Unit::TestCase
 
     assert_equal([], @cls[].collect { 99 })
 
-    # Ruby 1.9 feature change:
-    # Enumerable#collect without block returns an Enumerator.
-    #assert_equal([1, 2, 3], @cls[1, 2, 3].collect)
     assert_kind_of Enumerator, @cls[1, 2, 3].collect
+
+    assert_equal([[1, 2, 3]], [[1, 2, 3]].collect(&->(a, b, c) {[a, b, c]}))
   end
 
   # also update map!
@@ -601,7 +596,7 @@ class TestArray < Test::Unit::TestCase
     assert_equal([4, 5, 4, 5, 4, 5], b)
 
     assert_raise(TypeError) { [0].concat(:foo) }
-    assert_raise(RuntimeError) { [0].freeze.concat(:foo) }
+    assert_raise(FrozenError) { [0].freeze.concat(:foo) }
   end
 
   def test_count
@@ -732,7 +727,7 @@ class TestArray < Test::Unit::TestCase
     a = @cls[]
     i = 0
     a.each { |e|
-      assert_equal(a[i], e)
+      assert(false, "Never get here")
       i += 1
     }
     assert_equal(0, i)
@@ -752,7 +747,7 @@ class TestArray < Test::Unit::TestCase
     a = @cls[]
     i = 0
     a.each_index { |ind|
-      assert_equal(i, ind)
+      assert(false, "Never get here")
       i += 1
     }
     assert_equal(0, i)
@@ -1247,9 +1242,6 @@ class TestArray < Test::Unit::TestCase
     a = @cls[1, 2, 3]
     assert_equal(@cls[1, 2, 3, 4, 5], a.push(4, 5))
     assert_equal(@cls[1, 2, 3, 4, 5, nil], a.push(nil))
-    # Ruby 1.8 feature:
-    # Array#push accepts any number of arguments.
-    #assert_raise(ArgumentError, "a.push()") { a.push() }
     a.push
     assert_equal @cls[1, 2, 3, 4, 5, nil], a
     a.push 6, 7
@@ -1299,10 +1291,10 @@ class TestArray < Test::Unit::TestCase
 
     fa = a.dup.freeze
     assert_nothing_raised(RuntimeError) { a.replace(a) }
-    assert_raise(RuntimeError) { fa.replace(fa) }
+    assert_raise(FrozenError) { fa.replace(fa) }
     assert_raise(ArgumentError) { fa.replace() }
     assert_raise(TypeError) { a.replace(42) }
-    assert_raise(RuntimeError) { fa.replace(42) }
+    assert_raise(FrozenError) { fa.replace(42) }
   end
 
   def test_reverse
@@ -1316,9 +1308,6 @@ class TestArray < Test::Unit::TestCase
     a = @cls[*%w( dog cat bee ant )]
     assert_equal(@cls[*%w(ant bee cat dog)], a.reverse!)
     assert_equal(@cls[*%w(ant bee cat dog)], a)
-    # Ruby 1.8 feature change:
-    # Array#reverse always returns self.
-    #assert_nil(@cls[].reverse!)
     assert_equal @cls[], @cls[].reverse!
   end
 
@@ -1398,14 +1387,14 @@ class TestArray < Test::Unit::TestCase
     assert_equal(@cls[99],  a.slice(-2..-2))
 
     assert_equal(@cls[10, 11, 12], a.slice(9..11))
+    assert_equal(@cls[98, 99, 100], a.slice(97..))
+    assert_equal(@cls[10, 11, 12], a.slice(-91..-89))
     assert_equal(@cls[10, 11, 12], a.slice(-91..-89))
 
     assert_nil(a.slice(-101..-1))
+    assert_nil(a.slice(-101..))
 
     assert_nil(a.slice(10, -3))
-    # Ruby 1.8 feature change:
-    # Array#slice[size..x] always returns [].
-    #assert_nil(a.slice(10..7))
     assert_equal @cls[], a.slice(10..7)
   end
 
@@ -1445,6 +1434,8 @@ class TestArray < Test::Unit::TestCase
     a = @cls[1, 2, 3, 4, 5]
     assert_equal(nil, a.slice!(-6,2))
     assert_equal(@cls[1, 2, 3, 4, 5], a)
+
+    assert_equal("[2, 3]", [1,2,3].slice!(1,10000).inspect, "moved from btest/knownbug")
 
     assert_raise(ArgumentError) { @cls[1].slice! }
     assert_raise(ArgumentError) { @cls[1].slice!(0, 0, 0) }
@@ -1530,7 +1521,7 @@ class TestArray < Test::Unit::TestCase
     o2 = o1.clone
     ary << o1 << o2
     orig = ary.dup
-    assert_raise(RuntimeError, "frozen during comparison") {ary.sort!}
+    assert_raise(FrozenError, "frozen during comparison") {ary.sort!}
     assert_equal(orig, ary, "must not be modified once frozen")
   end
 
@@ -1631,6 +1622,12 @@ class TestArray < Test::Unit::TestCase
                  ary.min(2) {|a,b| a.length <=> b.length })
     assert_equal([13, 14], [20, 32, 32, 21, 30, 25, 29, 13, 14].min(2))
     assert_equal([2, 4, 6, 7], [2, 4, 8, 6, 7].min(4))
+
+    class << (obj = Object.new)
+      def <=>(x) 1 <=> x end
+      def coerce(x) [x, 1] end
+    end
+    assert_same(obj, [obj, 1.0].min)
   end
 
   def test_max
@@ -1646,6 +1643,12 @@ class TestArray < Test::Unit::TestCase
     assert_equal(%w[albatross horse],
                  ary.max(2) {|a,b| a.length <=> b.length })
     assert_equal([3, 2], [0, 0, 0, 0, 0, 0, 1, 3, 2].max(2))
+
+    class << (obj = Object.new)
+      def <=>(x) 1 <=> x end
+      def coerce(x) [x, 1] end
+    end
+    assert_same(obj, [obj, 1.0].max)
   end
 
   def test_uniq
@@ -1762,7 +1765,7 @@ class TestArray < Test::Unit::TestCase
     f = a.dup.freeze
     assert_raise(ArgumentError) { a.uniq!(1) }
     assert_raise(ArgumentError) { f.uniq!(1) }
-    assert_raise(RuntimeError) { f.uniq! }
+    assert_raise(FrozenError) { f.uniq! }
 
     assert_nothing_raised do
       a = [ {c: "b"}, {c: "r"}, {c: "w"}, {c: "g"}, {c: "g"} ]
@@ -1808,7 +1811,7 @@ class TestArray < Test::Unit::TestCase
   def test_uniq_bang_with_freeze
     ary = [1,2]
     orig = ary.dup
-    assert_raise(RuntimeError, "frozen during comparison") {
+    assert_raise(FrozenError, "frozen during comparison") {
       ary.uniq! {|v| ary.freeze; 1}
     }
     assert_equal(orig, ary, "must not be modified once frozen")
@@ -2115,13 +2118,14 @@ class TestArray < Test::Unit::TestCase
     assert_raise(IndexError) { [0][LONGP] = 2 }
     assert_raise(IndexError) { [0][(LONGP + 1) / 2 - 1] = 2 }
     assert_raise(IndexError) { [0][LONGP..-1] = 2 }
+    assert_raise(IndexError) { [0][LONGP..] = 2 }
     a = [0]
     a[2] = 4
     assert_equal([0, nil, 4], a)
     assert_raise(ArgumentError) { [0][0, 0, 0] = 0 }
     assert_raise(ArgumentError) { [0].freeze[0, 0, 0] = 0 }
     assert_raise(TypeError) { [0][:foo] = 0 }
-    assert_raise(RuntimeError) { [0].freeze[:foo] = 0 }
+    assert_raise(FrozenError) { [0].freeze[:foo] = 0 }
   end
 
   def test_first2
@@ -2146,8 +2150,8 @@ class TestArray < Test::Unit::TestCase
   end
 
   def test_unshift_error
-    assert_raise(RuntimeError) { [].freeze.unshift('cat') }
-    assert_raise(RuntimeError) { [].freeze.unshift() }
+    assert_raise(FrozenError) { [].freeze.unshift('cat') }
+    assert_raise(FrozenError) { [].freeze.unshift() }
   end
 
   def test_aref
@@ -2208,7 +2212,7 @@ class TestArray < Test::Unit::TestCase
     assert_equal([0, 1, 2], a.insert(-1, 2))
     assert_equal([0, 1, 3, 2], a.insert(-2, 3))
     assert_raise_with_message(IndexError, /-6/) { a.insert(-6, 4) }
-    assert_raise(RuntimeError) { [0].freeze.insert(0)}
+    assert_raise(FrozenError) { [0].freeze.insert(0)}
     assert_raise(ArgumentError) { [0].freeze.insert }
   end
 
@@ -2286,6 +2290,25 @@ class TestArray < Test::Unit::TestCase
 
     a = @cls[ 1, 2, 3, 4, 5 ]
     assert_equal(a, a.keep_if { |i| i > 3 })
+    assert_equal(@cls[4, 5], a)
+  end
+
+  def test_filter
+    assert_equal([0, 2], [0, 1, 2, 3].filter {|x| x % 2 == 0 })
+  end
+
+  # alias for select!
+  def test_filter!
+    a = @cls[ 1, 2, 3, 4, 5 ]
+    assert_equal(nil, a.filter! { true })
+    assert_equal(@cls[1, 2, 3, 4, 5], a)
+
+    a = @cls[ 1, 2, 3, 4, 5 ]
+    assert_equal(a, a.filter! { false })
+    assert_equal(@cls[], a)
+
+    a = @cls[ 1, 2, 3, 4, 5 ]
+    assert_equal(a, a.filter! { |i| i > 3 })
     assert_equal(@cls[4, 5], a)
   end
 
@@ -2389,8 +2412,8 @@ class TestArray < Test::Unit::TestCase
     assert_raise(ArgumentError) { a.flatten!(1, 2) }
     assert_raise(TypeError) { a.flatten!(:foo) }
     assert_raise(ArgumentError) { f.flatten!(1, 2) }
-    assert_raise(RuntimeError) { f.flatten! }
-    assert_raise(RuntimeError) { f.flatten!(:foo) }
+    assert_raise(FrozenError) { f.flatten! }
+    assert_raise(FrozenError) { f.flatten!(:foo) }
   end
 
   def test_shuffle
@@ -2728,7 +2751,7 @@ class TestArray < Test::Unit::TestCase
     assert_equal([], a.rotate!(13))
     assert_equal([], a.rotate!(-13))
     a = [].freeze
-    assert_raise_with_message(RuntimeError, /can\'t modify frozen/) {a.rotate!}
+    assert_raise_with_message(FrozenError, /can\'t modify frozen/) {a.rotate!}
     a = [1,2,3]
     assert_raise(ArgumentError) { a.rotate!(1, 1) }
   end

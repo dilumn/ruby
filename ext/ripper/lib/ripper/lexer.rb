@@ -54,6 +54,9 @@ class Ripper
       def ==(i) super or to_int == i end
       def &(i) self.class.new(to_int & i) end
       def |(i) self.class.new(to_int & i) end
+      def allbits?(i) to_int.allbits?(i) end
+      def anybits?(i) to_int.anybits?(i) end
+      def nobits?(i) to_int.nobits?(i) end
     end
 
     Elem = Struct.new(:pos, :event, :tok, :state) do
@@ -183,7 +186,7 @@ class Ripper
       if m = /[^\w\s$()\[\]{}?*+\.]/.match(pattern)
         raise CompileError, "invalid char in pattern: #{m[0].inspect}"
       end
-      buf = ''
+      buf = +''
       pattern.scan(/(?:\w+|\$\(|[()\[\]\{\}?*+\.]+)/) do |tok|
         case tok
         when /\w/

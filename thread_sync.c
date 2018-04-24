@@ -4,6 +4,14 @@
 static VALUE rb_cMutex, rb_cQueue, rb_cSizedQueue, rb_cConditionVariable;
 static VALUE rb_eClosedQueueError;
 
+/*
+ * keep these globally so we can walk and reinitialize them at fork
+ * in the child process
+ */
+static LIST_HEAD(szqueue_list);
+static LIST_HEAD(queue_list);
+static LIST_HEAD(condvar_list);
+
 /* sync_waiter is always on-stack */
 struct sync_waiter {
     rb_thread_t *th;
@@ -252,8 +260,8 @@ rb_mutex_lock(VALUE self)
 
 	while (mutex->th != th) {
 	    enum rb_thread_status prev_status = th->status;
-	    struct timeval *timeout = 0;
-	    struct timeval tv = { 0, 100000 }; /* 100ms */
+	    struct timespec *timeout = 0;
+	    struct timespec ts = { 0, 100000000 }; /* 100ms */
 
 	    th->status = THREAD_STOPPED_FOREVER;
 	    th->locking_mutex = self;
@@ -265,7 +273,7 @@ rb_mutex_lock(VALUE self)
 	     */
 	    if ((vm_living_thread_num(th->vm) == th->vm->sleeper) &&
 		!patrol_thread) {
-		timeout = &tv;
+		timeout = &ts;
 		patrol_thread = th;
 	    }
 
@@ -415,6 +423,20 @@ rb_mutex_abandon_all(rb_mutex_t *mutexes)
 	list_head_init(&mutex->waitq);
     }
 }
+
+/*
+ * All other threads are dead in the a new child process, so waitqs
+ * contain references to dead threads which we need to clean up
+ */
+static void
+rb_mutex_cleanup_keeping_mutexes(const rb_thread_t *current_thread)
+{
+    rb_mutex_t *mutex = current_thread->keeping_mutexes;
+    while (mutex) {
+        list_head_init(&mutex->waitq);
+        mutex = mutex->next_mutex;
+    }
+}
 #endif
 
 static VALUE
@@ -427,8 +449,8 @@ rb_mutex_sleep_forever(VALUE time)
 static VALUE
 rb_mutex_wait_for(VALUE time)
 {
-    struct timeval *t = (struct timeval *)time;
-    sleep_timeval(GET_THREAD(), *t, 0); /* permit spurious check */
+    struct timespec *t = (struct timespec*)time;
+    sleep_timespec(GET_THREAD(), *t, 0); /* permit spurious check */
     return Qnil;
 }
 
@@ -447,7 +469,10 @@ rb_mutex_sleep(VALUE self, VALUE timeout)
 	rb_ensure(rb_mutex_sleep_forever, Qnil, rb_mutex_lock, self);
     }
     else {
-	rb_ensure(rb_mutex_wait_for, (VALUE)&t, rb_mutex_lock, self);
+        struct timespec ts;
+        VALUE tsp = (VALUE)timespec_for(&ts, &t);
+
+        rb_ensure(rb_mutex_wait_for, tsp, rb_mutex_lock, self);
     }
     end = time(0) - beg;
     return INT2FIX(end);
@@ -523,6 +548,7 @@ void rb_mutex_allow_trap(VALUE self, int val)
 #define queue_waitq(q) UNALIGNED_MEMBER_PTR(q, waitq)
 PACKED_STRUCT_UNALIGNED(struct rb_queue {
     struct list_head waitq;
+    rb_serial_t fork_gen;
     const VALUE que;
     int num_waiting;
 });
@@ -568,12 +594,29 @@ queue_alloc(VALUE klass)
     return obj;
 }
 
+static int
+queue_fork_check(struct rb_queue *q)
+{
+    rb_serial_t fork_gen = GET_VM()->fork_gen;
+
+    if (q->fork_gen == fork_gen) {
+        return 0;
+    }
+    /* forked children can't reach into parent thread stacks */
+    q->fork_gen = fork_gen;
+    list_head_init(queue_waitq(q));
+    q->num_waiting = 0;
+    return 1;
+}
+
 static struct rb_queue *
 queue_ptr(VALUE obj)
 {
     struct rb_queue *q;
 
     TypedData_Get_Struct(obj, struct rb_queue, &queue_data_type, q);
+    queue_fork_check(q);
+
     return q;
 }
 
@@ -616,6 +659,11 @@ szqueue_ptr(VALUE obj)
     struct rb_szqueue *sq;
 
     TypedData_Get_Struct(obj, struct rb_szqueue, &szqueue_data_type, sq);
+    if (queue_fork_check(&sq->q)) {
+        list_head_init(szqueue_pushq(sq));
+        sq->num_waiting_push = 0;
+    }
+
     return sq;
 }
 
@@ -645,6 +693,15 @@ queue_closed_p(VALUE self)
 {
     return FL_TEST_RAW(self, QUEUE_CLOSED) != 0;
 }
+
+/*
+ *  Document-class: ClosedQueueError
+ *
+ *  The exception class which will be raised when pushing into a closed
+ *  Queue.  See Queue#close and SizedQueue#close.
+ */
+
+NORETURN(static void raise_closed_queue_error(VALUE self));
 
 static void
 raise_closed_queue_error(VALUE self)
@@ -852,7 +909,7 @@ queue_do_pop(VALUE self, struct rb_queue *q, int should_block)
 	    list_add_tail(&qw.as.q->waitq, &qw.w.node);
 	    qw.as.q->num_waiting++;
 
-	    rb_ensure(queue_sleep, Qfalse, queue_sleep_done, (VALUE)&qw);
+	    rb_ensure(queue_sleep, self, queue_sleep_done, (VALUE)&qw);
 	}
     }
 
@@ -1094,7 +1151,7 @@ rb_szqueue_push(int argc, VALUE *argv, VALUE self)
 	    list_add_tail(pushq, &qw.w.node);
 	    sq->num_waiting_push++;
 
-	    rb_ensure(queue_sleep, Qfalse, szqueue_sleep_done, (VALUE)&qw);
+	    rb_ensure(queue_sleep, self, szqueue_sleep_done, (VALUE)&qw);
 	}
     }
 
@@ -1156,6 +1213,15 @@ rb_szqueue_clear(VALUE self)
     return self;
 }
 
+/*
+ * Document-method: SizedQueue#length
+ * call-seq:
+ *   length
+ *   size
+ *
+ * Returns the length of the queue.
+ */
+
 static VALUE
 rb_szqueue_length(VALUE self)
 {
@@ -1195,9 +1261,9 @@ rb_szqueue_empty_p(VALUE self)
 
 
 /* ConditionalVariable */
-/* TODO: maybe this can be IMEMO */
 struct rb_condvar {
     struct list_head waitq;
+    rb_serial_t fork_gen;
 };
 
 /*
@@ -1244,8 +1310,14 @@ static struct rb_condvar *
 condvar_ptr(VALUE self)
 {
     struct rb_condvar *cv;
+    rb_serial_t fork_gen = GET_VM()->fork_gen;
 
     TypedData_Get_Struct(self, struct rb_condvar, &cv_data_type, cv);
+
+    /* forked children can't reach into parent thread stacks */
+    if (cv->fork_gen != fork_gen) {
+        list_head_init(&cv->waitq);
+    }
 
     return cv;
 }
@@ -1363,23 +1435,30 @@ undumpable(VALUE obj)
     UNREACHABLE;
 }
 
-static void
-alias_global_const(const char *name, VALUE klass)
+static VALUE
+define_thread_class(VALUE outer, const char *name, VALUE super)
 {
+    VALUE klass = rb_define_class_under(outer, name, super);
     rb_define_const(rb_cObject, name, klass);
+    return klass;
 }
 
 static void
 Init_thread_sync(void)
 {
+#undef rb_intern
 #if 0
+    rb_cMutex = rb_define_class("Mutex", rb_cObject); /* teach rdoc Mutex */
     rb_cConditionVariable = rb_define_class("ConditionVariable", rb_cObject); /* teach rdoc ConditionVariable */
     rb_cQueue = rb_define_class("Queue", rb_cObject); /* teach rdoc Queue */
     rb_cSizedQueue = rb_define_class("SizedQueue", rb_cObject); /* teach rdoc SizedQueue */
 #endif
 
+#define DEFINE_CLASS(name, super) \
+    rb_c##name = define_thread_class(rb_cThread, #name, rb_c##super)
+
     /* Mutex */
-    rb_cMutex = rb_define_class_under(rb_cThread, "Mutex", rb_cObject);
+    DEFINE_CLASS(Mutex, Object);
     rb_define_alloc_func(rb_cMutex, mutex_alloc);
     rb_define_method(rb_cMutex, "initialize", mutex_initialize, 0);
     rb_define_method(rb_cMutex, "locked?", rb_mutex_locked_p, 0);
@@ -1391,7 +1470,7 @@ Init_thread_sync(void)
     rb_define_method(rb_cMutex, "owned?", rb_mutex_owned_p, 0);
 
     /* Queue */
-    rb_cQueue = rb_define_class_under(rb_cThread, "Queue", rb_cObject);
+    DEFINE_CLASS(Queue, Object);
     rb_define_alloc_func(rb_cQueue, queue_alloc);
 
     rb_eClosedQueueError = rb_define_class("ClosedQueueError", rb_eStopIteration);
@@ -1414,7 +1493,7 @@ Init_thread_sync(void)
     rb_define_alias(rb_cQueue, "shift", "pop");
     rb_define_alias(rb_cQueue, "size", "length");
 
-    rb_cSizedQueue = rb_define_class_under(rb_cThread, "SizedQueue", rb_cQueue);
+    DEFINE_CLASS(SizedQueue, Queue);
     rb_define_alloc_func(rb_cSizedQueue, szqueue_alloc);
 
     rb_define_method(rb_cSizedQueue, "initialize", rb_szqueue_initialize, 1);
@@ -1435,8 +1514,7 @@ Init_thread_sync(void)
     rb_define_alias(rb_cSizedQueue, "size", "length");
 
     /* CVar */
-    rb_cConditionVariable = rb_define_class_under(rb_cThread,
-					"ConditionVariable", rb_cObject);
+    DEFINE_CLASS(ConditionVariable, Object);
     rb_define_alloc_func(rb_cConditionVariable, condvar_alloc);
 
     id_sleep = rb_intern("sleep");
@@ -1448,12 +1526,5 @@ Init_thread_sync(void)
     rb_define_method(rb_cConditionVariable, "signal", rb_condvar_signal, 0);
     rb_define_method(rb_cConditionVariable, "broadcast", rb_condvar_broadcast, 0);
 
-#define ALIAS_GLOBAL_CONST(name) \
-    alias_global_const(#name, rb_c##name)
-
-    ALIAS_GLOBAL_CONST(Mutex);
-    ALIAS_GLOBAL_CONST(Queue);
-    ALIAS_GLOBAL_CONST(SizedQueue);
-    ALIAS_GLOBAL_CONST(ConditionVariable);
     rb_provide("thread.rb");
 }

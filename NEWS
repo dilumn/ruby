@@ -1,6 +1,6 @@
 # -*- rdoc -*-
 
-= NEWS for Ruby 2.5.0
+= NEWS for Ruby 2.6.0
 
 This document is a list of user visible feature changes made between
 releases except for bug fixes.
@@ -10,301 +10,184 @@ reference information is supplied with.  For a full list of changes
 with all sufficient information, see the ChangeLog file or Redmine
 (e.g. <tt>https://bugs.ruby-lang.org/issues/$FEATURE_OR_BUG_NUMBER</tt>)
 
-== Changes since the 2.4.0 release
+== Changes since the 2.5.0 release
 
 === Language changes
 
-* Top-level constant look-up is removed.  [Feature #11547]
+* $SAFE is a process global state and we can set 0 again. [Feature #14250]
 
-* rescue/else/ensure are allowed inside do/end blocks.  [Feature #12906]
+* refinements take place at block passing.  [Feature #14223]
 
-* refinements take place in string interpolations.  [Feature #13812]
+* `else` without `rescue` is now causes a syntax error.  [EXPERIMENTAL]
+
+* constant names may start with a non-ASCII capital letter. [Feature #13770]
+
+* An endless range is introduced.  You can write a range that has no end, like `(0..)`.
+  The following shows typical use cases.  [Feature #12912]
+
+    ary[1..]                            # identical to ary[1..-1]
+    (1..).each {|index| ... }           # infinite loop from index 1
+    ary.zip(1..) {|elem, index| ... }   # ary.each.with_index(1) { }
 
 === Core classes updates (outstanding ones only)
 
 * Array
 
-  * Array#append  [Feature #12746]
-  * Array#prepend  [Feature #12746]
+  * Aliased methods:
 
-* Data
+    * Array#filter is a new alias for Array#select [Feature #13784]
+    * Array#filter! is a new alias for Array#select! [Feature #13784]
 
-  * Now deprecated [Feature #3072]
+* Binding
+
+  * New methods:
+
+    * added Binding#source_location.  [Feature #14230]
+
+      This method returns the source location of binding, a 2-element
+      array of `__FILE__` and `__LINE__`.  Traditionally, the same
+      information could be retrieved by `eval("[__FILE__, __LINE__]",
+      binding)`, but we are planning to change this behavior so that
+      `Kernel#eval` ignores binding's source location [Bug #4352].
+      So, users should use this newly-introduced method instead of
+      `Kernel#eval`.
 
 * Dir
 
-  * Dir.glob provides new optional keyword argument, :base.
-    [Feature #13056]
-  * Dir.children  [Feature #11302]
-  * Dir.each_child  [Feature #11302]
+  * New methods:
 
-* File
+    * added Dir#each_child and Dir#children instance methods. [Feature #13969]
 
-  * :newline option to File.open implies text mode now.  [Bug #13350]
-  * File#path now raises an IOError for files opened with
-    File::Constants::TMPFILE option. [Feature #13568]
-  * File.stat, File.exist?, and other rb_stat()-using methods release GVL
-    [Bug #13941]
-  * File.rename releases GVL [Feature #13951]
-  * Add File.lutime  [Feature #4052]
+* Enumerable
+
+  * Aliased methods:
+
+    * Enumerable#filter is a new alias for Enumerable#select [Feature #13784]
+
+* Enumerator::Lazy
+
+  * Aliased methods:
+
+    * Enumerator::Lazy#filter is a new alias for Enumerator::Lazy#select [Feature #13784]
+
+* Exception
+
+  * Exception#full_message takes :highlight and :order options [Bug #14324]
 
 * Hash
 
-  * Hash#transform_keys  [Feature #13583]
-  * Hash#transform_keys!  [Feature #13583]
-  * Hash#slice  [Feature #8499]
+  * Aliased methods:
 
-* IO
-
-  * IO#pread  [Feature #4532]
-  * IO#pwrite  [Feature #4532]
-  * IO#copy_stream tries copy offload with copy_file_range(2) [Feature #13867]
-  * IO#write accepts multiple arguments  [Feature #9323]
-
-* IOError
-
-  * exception message "stream closed" is changed  [Bug #13405]
-
-* Integer
-
-  * Integer.sqrt  [Feature #13219]
-  * Integer#step does no longer rescue exceptions when given
-    a step value which cannot be compared with #> to 0. [Feature #7688]
-  * Integer#{round,floor,ceil,truncate} now always return an Integer.
-    [Bug #13420]
+    * Hash#filter is a new alias for Hash#select [Feature #13784]
+    * Hash#filter! is a new alias for Hash#select! [Feature #13784]
 
 * Kernel
 
-  * Kernel#yield_self  [Feature #6721]
-  * Kernel#pp [Feature #14123]
+  * Kernel.#Complex takes :exception option to specify the way of error handling  [Feature #12732]
 
-* Module
-  * Module#attr, attr_accessor, attr_reader, attr_writer are now public [#14132]
-  * Module#define_method, alias_method, undef_method, remove_method are now public [#14133]
+  * Kernel.#Float takes :exception option to specify the way of error handling  [Feature #12732]
 
-* Numeric
+  * Kernel.#Integer takes :exception option to specify the way of error handling  [Feature #12732]
 
-  * Numerical comparison operators (<,<=,>=,>) no longer rescue exceptions
-    of #coerce. Return nil in #coerce if the coercion is impossible.
-    [Feature #7688]
+  * Kernel.#Rational takes :exception option to specify the way of error handling  [Feature #12732]
 
-* Process
-
-  * Precision of Process.times is improved if getrusage(2) exists. [Feature #11952]
-
-* Range
-  * Range#initialize no longer rescue exceptions when comparing begin and
-    end with #<=> and raise a "bad value for range" ArgumentError
-    but instead let the exception from the #<=> call go through.
-    [Feature #7688]
-
-* Regexp
-  * Update to Onigmo 6.1.3-669ac9997619954c298da971fcfacccf36909d05.
-    * Support absent operator https://github.com/k-takata/Onigmo/issues/82
-
-* String
-
-  * String#-@ deduplicates unfrozen strings.  Already-frozen
-    strings remain unchanged for compatibility.  [Feature #13077]
-  * -"literal" (String#-@) optimized to return the same object
-    (same as "literal".freeze in Ruby 2.1+) [Feature #13295]
-  * String#{casecmp,casecmp?} now return nil for non-string arguments
-    instead of raising a TypeError. [Bug #13312]
-  * String#delete_prefix is added to remove prefix [Feature #12694]
-  * String#delete_prefix! is added to remove prefix destructively [Feature #12694]
-  * String#delete_suffix is added to remove suffix [Feature #13665]
-  * String#delete_suffix! is added to remove suffix destructively [Feature #13665]
-  * String#each_grapheme_cluster and String#grapheme_clusters is added to
-    enumerate grapheme clusters [Feature #13780]
-  * String#start_with? supports regexp [Feature #13712]
-
-* Regexp/String: Update Unicode version from 9.0.0 to 10.0.0 [Feature #13685]
-
-* Thread
-
-  * Thread#fetch  [Feature #13009]
-
-  * Description set by Thread#name= is now visible on Windows 10.
-
-* Time
-
-  * Time#at receives 3rd argument which specifies the unit of 2nd argument.
-    [Feature #13919]
+  * Kernel.#system takes :exception option to raise an exception on
+    failure. [Feature #14386]
 
 * KeyError
 
-  * KeyError#receiver [Feature #12063]
-  * KeyError#key      [Feature #12063]
+  * KeyError#initialize accepts :receiver and :key options to set receiver and key in Ruby code. [Feature #14313]
+
+* NameError
+
+  * NameError#initialize accepts :receiver option to set receiver in Ruby code. [Feature #14313]
+
+* NoMethodError
+
+  * NoMethodError#initialize accepts :receiver option to set receiver in Ruby code. [Feature #14313]
+
+* Proc
+
+  * Proc#call doesn't change $SAFE any more. [Feature #14250]
+
+* Random
+
+  * New methods:
+
+    * added Random.bytes. [Feature #4938]
+
+* String
+
+  * String#split yields each substrings to the block if given. [Feature #4780]
 
 === Stdlib updates (outstanding ones only)
 
-* Bundler
-
-  * Add Bundler to Standard Library. [Feature #12733]
-
-* DRb
-  * ACL::ACLEntry.new no longer suppresses IPAddr::InvalidPrefixError.
-
 * ERB
-  * Add ERB#result_with_hash to render a template with local variables passed
-    with a Hash object. [Feature #8631]
-  * Default template file encoding is changed from ASCII-8BIT to UTF-8 in erb
-    command. [Bug #14095]
 
-  * Carriage returns are changed to be trimmed properly if trim_mode is specified
-    and used. Duplicated newlines will be removed on Windows. [Bug #5339] [Bug #11464]
+  * Add :trim_mode and :eoutvar keyword arguments to ERB.new. Now non-keyword arguments other than first one
+    are softly deprecated and will be removed when Ruby 2.5 becomes EOL. [Feature #14256]
 
-* IPAddr
-  * New methods are added:
-    * IPAddr#prefix
-    * IPAddr#loopback?
-    * IPAddr#private? [Feature #11666]
-    * IPAddr#link_local? [Feature #10912]
-  * IPAddr now rejects invalid address mask. [Bug #13399]
-  * IPAddr#ipv4_compat and #ipv4_compat? are deprecated. [Bug #13769]
+  * erb command's -S option is deprecated, which will be removed in the next version.
 
-* IRB
-  * `binding.irb` automatically requires irb and runs [Bug #13099] [experimental]
-  * Show source around `binding.irb` on session start [Feature #14124]
+* FileUtils
 
-* Net::HTTP
-  * Net::HTTP.new supports no_proxy parameter [Feature #11195]
-
-  * Net::HTTP#min_version/max_version [Feature #9450]
-
-  * Add more HTTP status classes
-
-  * Net::HTTP::STATUS_CODES is added as HTTP Status Code Repository [Misc #12935]
-
-  * Net::HTTP#proxy_user and Net::HTTP#proxy_pass now reflects http_proxy
-    environment variable if the system's environment variable is multiuser
-    safe. [Bug #12921]
-
-* Pathname
   * New method:
-    * Pathname#glob [Feature #7360]
 
-* Psych
+    * FileUtils#cp_lr [Feature #4189]
 
-  * Update to Psych 3.0.0.
-    * Add :symbolize_names option to Psych.load, Psych.safe_load like JSON.parse
-      https://github.com/ruby/psych/pull/333, https://github.com/ruby/psych/pull/337
-    * Add Psych::Handler#event_location
-      https://github.com/ruby/psych/pull/326
-    * Make frozen string literal = true
-      https://github.com/ruby/psych/pull/320
-    * Preserve time zone offset when deserializing times
-      https://github.com/ruby/psych/pull/316
-    * Removed deprecated method aliases for syck gem
-      https://github.com/ruby/psych/pull/312
+* Matrix
 
-* RbConfig
-  * New constants:
-    * RbConfig::LIMITS is added to provide the limits of C types.
-      This is available when rbconfig/sizeof is required.
-
-* Ripper
   * New method:
-    * Ripper#state is added to tell the state of scanner. [Feature #13686]
 
-  * New constants:
-    * Ripper::EXPR_BEG and so on for Ripper#state.
-
-* RDoc
-
-  * Update to RDoc 6.0.0.beta3.
-    * Replaced IRB based lexer with Ripper. It much improves the speed of generating document.
-    * https://github.com/ruby/rdoc/pull/512
-
-* Rubygems
-
-  * Update to Rubygems 2.7.0.
-    * http://blog.rubygems.org/2017/11/01/2.7.0-released.html
-    * http://blog.rubygems.org/2017/08/27/2.6.13-released.html
-    * http://blog.rubygems.org/2017/10/09/unsafe-object-deserialization-vulnerability.html
-
-* SecureRandom
-  * New methods:
-    * SecureRandom.alphanumeric
+    * Matrix#antisymmetric?
 
 * Set
-  * Add Set#to_s as alias to #inspect [Feature #13676]
-  * Add Set#=== as alias to #include? [Feature #13801]
-  * Add Set#reset [Feature #6589]
 
-* StringIO
-  * StringIO#write accepts multiple arguments
+  * Aliased methods:
 
-* StringScanner
-  * Add StringScanner#size, StringScanner#captures, StringScanner#values_at  [Feature #836]
+    * Set#filter! is a new alias for Set#select! [Feature #13784]
 
-* WEBrick
+* URI
 
-  * Add Server Name Indication (SNI) support [Feature #13729]
-
-* Zlib
-  * Zlib::GzipWriter#write accepts multiple arguments
+  * Add URI::File to handle file URI scheme [Feature #14035]
 
 === Compatibility issues (excluding feature bug fixes)
 
-* BasicSocket#read_nonblock and BasicSocket#write_nonblock no
-  longer sets the O_NONBLOCK file description flag as side effect
-  (on Linux only) [Feature #13362]
+* File
 
-* Net::HTTP
-  * Net::HTTP#start now pass :ENV to p_addr by default. [Bug #13351]
-    To avoid this, pass nil explicitly.
+  * File.read, File.binread, File.write, File.binwrite, File.foreach,
+    and File.readlines do not invoke external commands even if the path
+    starts with the pipe character |.  [Feature #14245]
 
-* Random.raw_seed renamed to become Random.urandom.  It is now
-  applicable to non-seeding purposes due to [Bug #9569].
+* Dir
 
-* Socket::Ifaddr#vhid is added [Feature #13803]
-
-* ConditionVariable, Queue and SizedQueue reimplemented for speed.
-  They no longer subclass Struct. [Feature #13552]
+  * Dir.glob with '\0'-separated pattern list will be deprecated, and
+    is now warned.  [Feature #14643]
 
 === Stdlib compatibility issues (excluding feature bug fixes)
-
-* mathn.rb
-  Removed from stdlib. [Feature #10169]
-
-* Rubygems
-  * Removed "ubygems.rb" file from stdlib. It's needless since Ruby 1.9.
 
 === C API updates
 
 === Supported platform changes
 
-* Drop to support NaCl platform
-  * https://bugs.chromium.org/p/chromium/issues/detail?id=239656#c160
-
 === Implementation improvements
 
-* (This might not be a "user visible feature change" but) Hash class's
-  hash function is now SipHash13. [Feature #13017]
+* Speedup `Proc#call` because we don't need to care about `$SAFE` any more. [Feature #14318]
+  With `lc_fizzbuzz` benchmark which uses so many `Proc#call` we can measure
+  x1.4 improvements [Bug #10212].
 
-* SecureRandom now prefers OS-provided sources than OpenSSL. [Bug #9569]
+* Speedup `block.call` where `block` is passed block parameter. [Feature #14330]
+  Ruby 2.5 improves block passing performance. [Feature #14045]
+  Additionally, Ruby 2.6 improves the performance of passed block calling.
 
-* Mutex rewritten to be smaller and faster [Feature #13517]
+* Introduce an initial implementation of JIT (Just-in-time) compiler. [Feature #14235] [experimental]
+  * `--jit` option is added to enable JIT. `--jit-verbose=1` is good for inspection. See `ruby --help` for others.
+  * This JIT relies on C compiler used to build Ruby, on runtime. Only gcc and clang are supported for the JIT
+    for now, and MinGW support has some issues.
+  * As of 2.6.0-preview1, we're just preparing infrastructure for JIT and very few optimizations are implemented.
+    So it's not ready for benchmarking Ruby's JIT performance yet. It's known that current JIT enablement makes
+    Rails application slower for now.
 
-* Performance of block passing using block parameters is improved by
-  lazy Proc allocation [Feature #14045]
-
-* Dynamic instrumentation for TracePoint hooks instead of using "trace"
-  instruction to avoid overhead [Feature #14104]
+* VM generator script renewal; makes the generated VM more optimized. [GH-1779]
 
 === Miscellaneous changes
-
-* Print backtrace and error message in reverse order if STDERR is unchanged and a tty.
-  [Feature #8661] [experimental]
-
-* Print error message in bold/underlined text if STDERR is unchanged and a tty.
-  [Feature #14140] [experimental]
-
-* configure option --with-ext now mandates its arguments.  So for
-  instance if you run ./configure --with-ext=openssl,+ then the
-  openssl library is guaranteed compiled, otherwise the build fails
-  abnormally.
-
-  Note however to always add the ",+" at the end of the argument.
-  Otherwise nothing but openssl are built.  [Feature #13302]

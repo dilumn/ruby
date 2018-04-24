@@ -41,7 +41,7 @@ command:
 
 Or if you are using git then use the following command:
 
-    $ git clone git://github.com/ruby/ruby.git
+    $ git clone https://github.com/ruby/ruby.git
 
 There are some other branches under development. Try the following command
 to see the list of branches:
@@ -66,7 +66,7 @@ send the following phrase:
     subscribe
 
 in the mail body (not subject) to the address
-<mailto:ruby-talk-request@ruby-lang.org>.
+<ruby-talk-request@ruby-lang.org>.
 
 ## How to compile and install
 
@@ -172,4 +172,4 @@ See the file [CONTRIBUTING.md](CONTRIBUTING.md)
 Ruby was originally designed and developed by Yukihiro Matsumoto (Matz) in
 1995.
 
-<mailto:matz@ruby-lang.org>
+<matz@ruby-lang.org>

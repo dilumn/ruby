@@ -9,6 +9,7 @@
 
 **********************************************************************/
 
+#include "ruby/encoding.h"
 #include "internal.h"
 #include <sys/types.h>
 #include <ctype.h>
@@ -241,7 +242,8 @@ str_associated(VALUE str)
  *   H            | String  | hex string (high nibble first)
  *   h            | String  | hex string (low nibble first)
  *   u            | String  | UU-encoded string
- *   M            | String  | quoted printable, MIME encoding (see RFC2045)
+ *   M            | String  | quoted printable, MIME encoding (see also RFC2045)
+ *                |         | (text mode but input must use LF and output LF)
  *   m            | String  | base64 encoded string (see RFC 2045, count is width)
  *                |         | (if count is 0, no line feed are added, see RFC 4648)
  *   P            | String  | pointer to a structure (fixed-length string)
@@ -1011,10 +1013,11 @@ hex2num(char c)
 	rb_ary_store(ary, RARRAY_LEN(ary)+tmp_len-1, Qnil); \
 } while (0)
 
-/* Workaround for Oracle Solaris Studio 12.4/12.5 C compiler optimization bug
+/* Workaround for Oracle Developer Studio (Oracle Solaris Studio)
+ * 12.4/12.5/12.6 C compiler optimization bug
  * with "-xO4" optimization option.
  */
-#if defined(__SUNPRO_C) && 0x5130 <= __SUNPRO_C && __SUNPRO_C <= 0x5140
+#if defined(__SUNPRO_C) && 0x5130 <= __SUNPRO_C && __SUNPRO_C <= 0x5150
 # define AVOID_CC_BUG volatile
 #else
 # define AVOID_CC_BUG
@@ -1126,7 +1129,7 @@ pack_unpack_internal(VALUE str, VALUE fmt, int mode)
 	else if (ISDIGIT(*p)) {
 	    errno = 0;
 	    len = STRTOUL(p, (char**)&p, 10);
-	    if (errno) {
+	    if (len < 0 || errno) {
 		rb_raise(rb_eRangeError, "pack length too big");
 	    }
 	}

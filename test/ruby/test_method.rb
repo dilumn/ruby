@@ -782,6 +782,19 @@ class TestMethod < Test::Unit::TestCase
     assert_equal(:bar, m.call, feature8391)
   end
 
+  def test_singleton_method_prepend
+    bug14658 = '[Bug #14658]'
+    c1 = Class.new
+    o = c1.new
+    def o.bar; :bar; end
+    class << o; prepend Module.new; end
+    m = assert_nothing_raised(NameError, bug14658) {o.singleton_method(:bar)}
+    assert_equal(:bar, m.call, bug14658)
+
+    o = Object.new
+    assert_raise(NameError, bug14658) {o.singleton_method(:bar)}
+  end
+
   Feature9783 = '[ruby-core:62212] [Feature #9783]'
 
   def assert_curry_three_args(m)
@@ -926,6 +939,11 @@ class TestMethod < Test::Unit::TestCase
     assert_equal(m1.source_location, m2.source_location, bug)
   end
 
+  def test_super_method_after_bind
+    assert_nil String.instance_method(:length).bind(String.new).super_method,
+      '[ruby-core:85231] [Bug #14421]'
+  end
+
   def rest_parameter(*rest)
     rest
   end
@@ -1016,5 +1034,10 @@ class TestMethod < Test::Unit::TestCase
     assert_separately [], body
     # without trace insn
     assert_separately [], "RubyVM::InstructionSequence.compile_option = {trace_instruction: false}\n" + body
+  end
+
+  def test_eqq
+    assert_operator(0.method(:<), :===, 5)
+    assert_not_operator(0.method(:<), :===, -5)
   end
 end

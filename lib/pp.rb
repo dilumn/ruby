@@ -5,9 +5,6 @@ require 'prettyprint'
 ##
 # A pretty-printer for Ruby objects.
 #
-# All examples assume you have loaded the PP class with:
-#   require 'pp'
-#
 ##
 # == What PP Does
 #
@@ -552,14 +549,11 @@ module Kernel
   # prints arguments in pretty form.
   #
   # pp returns argument(s).
-  alias __pp_backup__ pp if method_defined?(:pp)
   def pp(*objs)
     objs.each {|obj|
       PP.pp(obj)
     }
     objs.size <= 1 ? objs.first : objs
   end
-  undef __pp_backup__ if method_defined?(:__pp_backup__)
   module_function :pp
 end
-

@@ -447,14 +447,21 @@ fill_random_bytes_urandom(void *seed, size_t size)
 			     O_RDONLY, 0);
     struct stat statbuf;
     ssize_t ret = 0;
+    size_t offset = 0;
 
     if (fd < 0) return -1;
     rb_update_max_fd(fd);
     if (fstat(fd, &statbuf) == 0 && S_ISCHR(statbuf.st_mode)) {
-	ret = read(fd, seed, size);
+	do {
+	    ret = read(fd, ((char*)seed) + offset, size - offset);
+	    if (ret < 0) {
+		close(fd);
+		return -1;
+	    }
+	    offset += (size_t)ret;
+	} while(offset < size);
     }
     close(fd);
-    if (ret < 0 || (size_t)ret < size) return -1;
     return 0;
 }
 #else
@@ -489,12 +496,12 @@ fill_random_bytes_syscall(void *seed, size_t size, int unused)
 	    prov = (HCRYPTPROV)INVALID_HANDLE_VALUE;
 	}
 	old_prov = (HCRYPTPROV)ATOMIC_PTR_CAS(perm_prov, 0, prov);
-	if (LIKELY(!old_prov)) { /* no other threads acquried */
+	if (LIKELY(!old_prov)) { /* no other threads acquired */
 	    if (prov != (HCRYPTPROV)INVALID_HANDLE_VALUE) {
 		rb_gc_register_mark_object(Data_Wrap_Struct(0, 0, release_crypt, &perm_prov));
 	    }
 	}
-	else {			/* another thread acquried */
+	else {			/* another thread acquired */
 	    if (prov != (HCRYPTPROV)INVALID_HANDLE_VALUE) {
 		CryptReleaseContext(prov, 0);
 	    }
@@ -518,16 +525,20 @@ fill_random_bytes_syscall(void *seed, size_t size, int need_secure)
     static rb_atomic_t try_syscall = 1;
     if (try_syscall) {
 	long ret;
+	size_t offset = 0;
 	int flags = 0;
 	if (!need_secure)
 	    flags = GRND_NONBLOCK;
-	errno = 0;
-	ret = syscall(__NR_getrandom, seed, size, flags);
-	if (errno == ENOSYS) {
-	    ATOMIC_SET(try_syscall, 0);
-	    return -1;
-	}
-	if ((size_t)ret == size) return 0;
+	do {
+	    errno = 0;
+	    ret = syscall(__NR_getrandom, ((char*)seed) + offset, size - offset, flags);
+	    if (ret == -1) {
+		ATOMIC_SET(try_syscall, 0);
+		return -1;
+	    }
+	    offset += (size_t)ret;
+	} while(offset < size);
+	return 0;
     }
     return -1;
 }
@@ -1073,7 +1084,7 @@ random_ulong_limited_big(VALUE obj, rb_random_t *rnd, VALUE vmax)
 static VALUE genrand_bytes(rb_random_t *rnd, long n);
 
 /*
- * call-seq: prng.bytes(size) -> a_string
+ * call-seq: prng.bytes(size) -> string
  *
  * Returns a random binary string containing +size+ bytes.
  *
@@ -1121,6 +1132,19 @@ rb_random_bytes(VALUE obj, long n)
 	return obj_random_bytes(obj, NULL, n);
     }
     return genrand_bytes(rnd, n);
+}
+
+/*
+ * call-seq: Random.bytes(size) -> string
+ *
+ * Returns a random binary string.
+ * The argument +size+ specifies the length of the returned string.
+ */
+static VALUE
+random_s_bytes(VALUE obj, VALUE len)
+{
+    rb_random_t *rnd = rand_start(&default_rand);
+    return genrand_bytes(rnd, NUM2LONG(rb_to_int(len)));
 }
 
 static VALUE
@@ -1354,6 +1378,16 @@ rand_random(int argc, VALUE *argv, VALUE obj, rb_random_t *rnd)
     return rand_range(obj, rnd, vmax);
 }
 
+/*
+ * call-seq:
+ *   prng.random_number      -> float
+ *   prng.random_number(max) -> number
+ *   prng.rand               -> float
+ *   prng.rand(max)          -> number
+ *
+ * Generates formatted random number from raw random bytes.
+ * See Random#rand.
+ */
 static VALUE
 rand_random_number(int argc, VALUE *argv, VALUE obj)
 {
@@ -1620,19 +1654,24 @@ InitVM_Random(void)
     {
 	/* Direct access to Ruby's Pseudorandom number generator (PRNG). */
 	VALUE rand_default = Init_Random_default();
+	/* The default Pseudorandom number generator.  Used by class
+	 * methods of Random. */
 	rb_define_const(rb_cRandom, "DEFAULT", rand_default);
     }
 
     rb_define_singleton_method(rb_cRandom, "srand", rb_f_srand, -1);
     rb_define_singleton_method(rb_cRandom, "rand", random_s_rand, -1);
+    rb_define_singleton_method(rb_cRandom, "bytes", random_s_bytes, 1);
     rb_define_singleton_method(rb_cRandom, "new_seed", random_seed, 0);
     rb_define_singleton_method(rb_cRandom, "urandom", random_raw_seed, 1);
     rb_define_private_method(CLASS_OF(rb_cRandom), "state", random_s_state, 0);
     rb_define_private_method(CLASS_OF(rb_cRandom), "left", random_s_left, 0);
 
     {
+	/* Format raw random number as Random does */
 	VALUE m = rb_define_module_under(rb_cRandom, "Formatter");
 	rb_include_module(rb_cRandom, m);
+	rb_extend_object(rb_cRandom, m);
 	rb_define_method(m, "random_number", rand_random_number, -1);
 	rb_define_method(m, "rand", rand_random_number, -1);
     }

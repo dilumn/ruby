@@ -48,7 +48,7 @@ define archcmd
 %.i: %.$(1).i
 endef
 
-$(foreach arch,$(filter -arch=%,$(subst -arch ,-arch=,$(ARCH_FLAG))),\
+$(foreach arch,$(arch_flags),\
 	$(eval $(call archcmd,$(patsubst -arch=%,%,$(value arch)),$(patsubst -arch=%,-arch %,$(value arch)))))
 endif
 
@@ -61,7 +61,7 @@ endif
 ORDERED_TEST_TARGETS := $(filter $(TEST_TARGETS), \
 	btest-ruby test-knownbug test-basic \
 	test-testframework test-ruby test-almost test-all \
-	test-spec test-bundler-prepare test-bundler \
+	test-spec \
 	)
 prev_test := $(if $(filter test-spec,$(ORDERED_TEST_TARGETS)),test-spec-precheck)
 $(foreach test,$(ORDERED_TEST_TARGETS), \
@@ -139,8 +139,36 @@ $(TIMESTAMPDIR)/.exec.time:
 .PHONY: commit
 commit: $(if $(filter commit,$(MAKECMDGOALS)),$(filter-out commit,$(MAKECMDGOALS)))
 	@$(BASERUBY) -C "$(srcdir)" -I./tool -rvcs -e 'VCS.detect(".").commit'
-	$(Q)$(MAKE) $(mflags) Q=$(Q) REVISION_FORCE=PHONY update-src srcs all-incs
+	$(Q)$(MAKE) $(mflags) Q=$(Q) srcs_vpath='$(srcdir)/' REVISION_FORCE=PHONY update-src srcs all-incs
 
 ifeq ($(words $(filter update-gems extract-gems,$(MAKECMDGOALS))),2)
 extract-gems: update-gems
+endif
+
+ifeq ($(filter 0 1,$(words $(arch_flags))),)
+$(foreach x,$(patsubst -arch=%,%,$(arch_flags)), \
+	  $(eval $$(MJIT_HEADER:.h=)-$(value x).h \
+		 $$(MJIT_MIN_HEADER:.h=)-$(value x).h \
+		 $$(TIMESTAMPDIR)/$$(MJIT_HEADER:.h=)-$(value x).time \
+		 : ARCH_FLAG := -arch $(value x)))
+
+$(foreach x,$(patsubst -arch=%,%,$(arch_flags)), \
+	$(eval $$(MJIT_HEADER:.h=)-$(value x).h: \
+		$$(TIMESTAMPDIR)/$$(MJIT_HEADER:.h=)-$(value x).time))
+
+mjit_min_headers := $(patsubst -arch=%,$(MJIT_MIN_HEADER:.h=-%.h),$(arch_flags))
+$(MJIT_MIN_HEADER): $(mjit_min_headers) $(PREP)
+	@ set -e; set $(patsubst -arch=%,%,$(arch_flags)); \
+	cd $(@D); h=$(@F:.h=); \
+	exec > $(@F).new; \
+	echo '#if 0'; \
+	for arch; do\
+	  echo "#elif defined __$${arch}__"; \
+	  echo "# include \"$$h-$$arch.h\""; \
+	done; \
+	echo "#else"; echo "# error unsupported platform"; echo "#endif"
+	$(IFCHANGE) $@ $@.new
+	$(Q) $(MAKEDIRS) $(MJIT_HEADER_INSTALL_DIR)
+	$(Q) $(MAKE_LINK) $@ $(MJIT_HEADER_INSTALL_DIR)/$(@F)
+
 endif

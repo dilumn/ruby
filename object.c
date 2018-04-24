@@ -11,9 +11,10 @@
 
 **********************************************************************/
 
-#include "internal.h"
+#include "ruby/encoding.h"
 #include "ruby/st.h"
 #include "ruby/util.h"
+#include "internal.h"
 #include <stdio.h>
 #include <errno.h>
 #include <ctype.h>
@@ -49,6 +50,7 @@ VALUE rb_cFalseClass; /*!< FalseClass class */
 #define id_init_clone       idInitialize_clone
 #define id_init_dup         idInitialize_dup
 #define id_const_missing    idConst_missing
+#define id_to_f             idTo_f
 
 #define CLASS_OR_MODULE_P(obj) \
     (!SPECIAL_CONST_P(obj) && \
@@ -197,7 +199,7 @@ rb_eql(VALUE obj1, VALUE obj2)
  * \private
  *++
  */
-VALUE
+MJIT_FUNC_EXPORTED VALUE
 rb_obj_equal(VALUE obj1, VALUE obj2)
 {
     if (obj1 == obj2) return Qtrue;
@@ -216,7 +218,7 @@ VALUE rb_obj_hash(VALUE obj);
  *++
  */
 
-VALUE
+MJIT_FUNC_EXPORTED VALUE
 rb_obj_not(VALUE obj)
 {
     return RTEST(obj) ? Qfalse : Qtrue;
@@ -232,7 +234,7 @@ rb_obj_not(VALUE obj)
  *++
  */
 
-VALUE
+MJIT_FUNC_EXPORTED VALUE
 rb_obj_not_equal(VALUE obj1, VALUE obj2)
 {
     VALUE result = rb_funcall(obj1, id_eq, 1, obj2);
@@ -303,7 +305,7 @@ rb_obj_singleton_class(VALUE obj)
 }
 
 /*! \private */
-void
+MJIT_FUNC_EXPORTED void
 rb_obj_copy_ivar(VALUE dest, VALUE obj)
 {
     if (!(RBASIC(dest)->flags & ROBJECT_EMBED) && ROBJECT_IVPTR(dest)) {
@@ -1315,7 +1317,7 @@ rb_obj_infect(VALUE victim, VALUE carrier)
  *
  *  <em>produces:</em>
  *
- *     prog.rb:3:in `<<': can't modify frozen Array (RuntimeError)
+ *     prog.rb:3:in `<<': can't modify frozen Array (FrozenError)
  *     	from prog.rb:3
  *
  *  Objects of the following classes are always frozen: Integer,
@@ -2478,7 +2480,7 @@ rb_mod_const_get(int argc, VALUE *argv, VALUE mod)
 	if (!id) {
 	    part = rb_str_subseq(name, beglen, len);
 	    OBJ_FREEZE(part);
-	    if (!ISUPPER(*pbeg) || !rb_is_const_name(part)) {
+	    if (!rb_is_const_name(part)) {
 		name = part;
 		goto wrong_name;
 	    }
@@ -2631,7 +2633,7 @@ rb_mod_const_defined(int argc, VALUE *argv, VALUE mod)
 	if (!id) {
 	    part = rb_str_subseq(name, beglen, len);
 	    OBJ_FREEZE(part);
-	    if (!ISUPPER(*pbeg) || !rb_is_const_name(part)) {
+	    if (!rb_is_const_name(part)) {
 		name = part;
 		goto wrong_name;
 	    }
@@ -3018,7 +3020,7 @@ rb_check_convert_type(VALUE val, int type, const char *tname, const char *method
 }
 
 /*! \private */
-VALUE
+MJIT_FUNC_EXPORTED VALUE
 rb_check_convert_type_with_id(VALUE val, int type, const char *tname, ID method)
 {
     VALUE v;
@@ -3033,17 +3035,18 @@ rb_check_convert_type_with_id(VALUE val, int type, const char *tname, ID method)
     return v;
 }
 
+#define try_to_int(val, mid, raise) \
+    convert_type_with_id(val, "Integer", mid, raise, -1)
 
 static VALUE
-rb_to_integer(VALUE val, const char *method)
+rb_to_integer(VALUE val, const char *method, ID mid)
 {
     VALUE v;
 
-    if (FIXNUM_P(val)) return val;
-    if (RB_TYPE_P(val, T_BIGNUM)) return val;
-    v = convert_type(val, "Integer", method, TRUE);
-    if (!rb_obj_is_kind_of(v, rb_cInteger)) {
-	conversion_mismatch(val, "Integer", method, v);
+    if (RB_INTEGER_TYPE_P(val)) return val;
+    v = try_to_int(val, mid, TRUE);
+    if (!RB_INTEGER_TYPE_P(v)) {
+        conversion_mismatch(val, "Integer", method, v);
     }
     return v;
 }
@@ -3066,8 +3069,8 @@ rb_check_to_integer(VALUE val, const char *method)
     if (FIXNUM_P(val)) return val;
     if (RB_TYPE_P(val, T_BIGNUM)) return val;
     v = convert_type(val, "Integer", method, FALSE);
-    if (!rb_obj_is_kind_of(v, rb_cInteger)) {
-	return Qnil;
+    if (!RB_INTEGER_TYPE_P(v)) {
+        return Qnil;
     }
     return v;
 }
@@ -3083,7 +3086,7 @@ rb_check_to_integer(VALUE val, const char *method)
 VALUE
 rb_to_int(VALUE val)
 {
-    return rb_to_integer(val, "to_int");
+    return rb_to_integer(val, "to_int", idTo_int);
 }
 
 /**
@@ -3098,44 +3101,64 @@ rb_to_int(VALUE val)
 VALUE
 rb_check_to_int(VALUE val)
 {
-    return rb_check_to_integer(val, "to_int");
+    if (RB_INTEGER_TYPE_P(val)) return val;
+    val = try_to_int(val, idTo_int, FALSE);
+    if (RB_INTEGER_TYPE_P(val)) return val;
+    return Qnil;
 }
 
 static VALUE
-rb_convert_to_integer(VALUE val, int base)
+rb_check_to_i(VALUE val)
+{
+    if (RB_INTEGER_TYPE_P(val)) return val;
+    val = try_to_int(val, idTo_i, FALSE);
+    if (RB_INTEGER_TYPE_P(val)) return val;
+    return Qnil;
+}
+
+static VALUE
+rb_convert_to_integer(VALUE val, int base, int raise_exception)
 {
     VALUE tmp;
 
     if (RB_FLOAT_TYPE_P(val)) {
-	double f;
-	if (base != 0) goto arg_error;
-	f = RFLOAT_VALUE(val);
-	if (FIXABLE(f)) return LONG2FIX((long)f);
-	return rb_dbl2big(f);
+        double f;
+        if (base != 0) goto arg_error;
+        f = RFLOAT_VALUE(val);
+        if (FIXABLE(f)) return LONG2FIX((long)f);
+        return rb_dbl2big(f);
     }
     else if (RB_INTEGER_TYPE_P(val)) {
-	if (base != 0) goto arg_error;
-	return val;
+        if (base != 0) goto arg_error;
+        return val;
     }
     else if (RB_TYPE_P(val, T_STRING)) {
-	return rb_str_to_inum(val, base, TRUE);
+        return rb_str_convert_to_inum(val, base, TRUE, raise_exception);
     }
     else if (NIL_P(val)) {
-	if (base != 0) goto arg_error;
-	rb_raise(rb_eTypeError, "can't convert nil into Integer");
+        if (base != 0) goto arg_error;
+        if (!raise_exception) return Qnil;
+        rb_raise(rb_eTypeError, "can't convert nil into Integer");
     }
     if (base != 0) {
-	tmp = rb_check_string_type(val);
-	if (!NIL_P(tmp)) return rb_str_to_inum(tmp, base, TRUE);
+        tmp = rb_check_string_type(val);
+        if (!NIL_P(tmp)) return rb_str_convert_to_inum(tmp, base, TRUE, raise_exception);
       arg_error:
-	rb_raise(rb_eArgError, "base specified for non string value");
+        if (!raise_exception) return Qnil;
+        rb_raise(rb_eArgError, "base specified for non string value");
     }
-    tmp = convert_type(val, "Integer", "to_int", FALSE);
-    if (NIL_P(tmp)) {
-	return rb_to_integer(val, "to_i");
-    }
-    return tmp;
 
+    tmp = rb_protect(rb_check_to_int, val, NULL);
+    if (RB_INTEGER_TYPE_P(tmp)) return tmp;
+    rb_set_errinfo(Qnil);
+
+    if (!raise_exception) {
+        VALUE result = rb_protect(rb_check_to_i, val, NULL);
+        rb_set_errinfo(Qnil);
+        return result;
+    }
+
+    return rb_to_integer(val, "to_i", idTo_i);
 }
 
 /**
@@ -3147,7 +3170,19 @@ rb_convert_to_integer(VALUE val, int base)
 VALUE
 rb_Integer(VALUE val)
 {
-    return rb_convert_to_integer(val, 0);
+    return rb_convert_to_integer(val, 0, TRUE);
+}
+
+static int
+opts_exception_p(VALUE opts)
+{
+    static ID kwds[1];
+    VALUE exception;
+    if (!kwds[0]) {
+        kwds[0] = rb_intern_const("exception");
+    }
+    rb_get_kwargs(opts, kwds, 0, 1, &exception);
+    return exception != Qfalse;
 }
 
 /*
@@ -3177,20 +3212,104 @@ rb_Integer(VALUE val)
 static VALUE
 rb_f_integer(int argc, VALUE *argv, VALUE obj)
 {
-    VALUE arg = Qnil;
+    VALUE arg = Qnil, opts = Qnil;
     int base = 0;
 
-    switch (argc) {
+    switch (rb_scan_args(argc, argv, "11:", NULL, NULL, &opts)) {
       case 2:
-	base = NUM2INT(argv[1]);
+        base = NUM2INT(argv[1]);
       case 1:
-	arg = argv[0];
-	break;
+        arg = argv[0];
+        break;
       default:
-	/* should cause ArgumentError */
-	rb_scan_args(argc, argv, "11", NULL, NULL);
+        UNREACHABLE;
     }
-    return rb_convert_to_integer(arg, base);
+
+    return rb_convert_to_integer(arg, base, opts_exception_p(opts));
+}
+
+static double
+rb_cstr_to_dbl_raise(const char *p, int badcheck, int raise, int *error)
+{
+    const char *q;
+    char *end;
+    double d;
+    const char *ellipsis = "";
+    int w;
+    enum {max_width = 20};
+#define OutOfRange() ((end - p > max_width) ? \
+                      (w = max_width, ellipsis = "...") : \
+                      (w = (int)(end - p), ellipsis = ""))
+
+    if (!p) return 0.0;
+    q = p;
+    while (ISSPACE(*p)) p++;
+
+    if (!badcheck && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        return 0.0;
+    }
+
+    d = strtod(p, &end);
+    if (errno == ERANGE) {
+        OutOfRange();
+        rb_warning("Float %.*s%s out of range", w, p, ellipsis);
+        errno = 0;
+    }
+    if (p == end) {
+        if (badcheck) {
+          bad:
+            if (raise)
+                rb_invalid_str(q, "Float()");
+            else {
+                if (error) *error = 1;
+                return 0.0;
+            }
+        }
+        return d;
+    }
+    if (*end) {
+        char buf[DBL_DIG * 4 + 10];
+        char *n = buf;
+        char *e = buf + sizeof(buf) - 1;
+        char prev = 0;
+
+        while (p < end && n < e) prev = *n++ = *p++;
+        while (*p) {
+            if (*p == '_') {
+                /* remove an underscore between digits */
+                if (n == buf || !ISDIGIT(prev) || (++p, !ISDIGIT(*p))) {
+                    if (badcheck) goto bad;
+                    break;
+                }
+            }
+            prev = *p++;
+            if (n < e) *n++ = prev;
+        }
+        *n = '\0';
+        p = buf;
+
+        if (!badcheck && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+            return 0.0;
+        }
+
+        d = strtod(p, &end);
+        if (errno == ERANGE) {
+            OutOfRange();
+            rb_warning("Float %.*s%s out of range", w, p, ellipsis);
+            errno = 0;
+        }
+        if (badcheck) {
+            if (!end || p == end) goto bad;
+            while (*end && ISSPACE(*end)) end++;
+            if (*end) goto bad;
+        }
+    }
+    if (errno == ERANGE) {
+        errno = 0;
+        OutOfRange();
+        rb_raise(rb_eArgError, "Float %.*s%s out of range", w, q, ellipsis);
+    }
+    return d;
 }
 
 /*!
@@ -3207,81 +3326,43 @@ rb_f_integer(int argc, VALUE *argv, VALUE obj)
 double
 rb_cstr_to_dbl(const char *p, int badcheck)
 {
-    const char *q;
-    char *end;
-    double d;
-    const char *ellipsis = "";
-    int w;
-    enum {max_width = 20};
-#define OutOfRange() ((end - p > max_width) ? \
-		      (w = max_width, ellipsis = "...") : \
-		      (w = (int)(end - p), ellipsis = ""))
-
-    if (!p) return 0.0;
-    q = p;
-    while (ISSPACE(*p)) p++;
-
-    if (!badcheck && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
-	return 0.0;
-    }
-
-    d = strtod(p, &end);
-    if (errno == ERANGE) {
-	OutOfRange();
-	rb_warning("Float %.*s%s out of range", w, p, ellipsis);
-	errno = 0;
-    }
-    if (p == end) {
-	if (badcheck) {
-	  bad:
-	    rb_invalid_str(q, "Float()");
-	}
-	return d;
-    }
-    if (*end) {
-	char buf[DBL_DIG * 4 + 10];
-	char *n = buf;
-	char *e = buf + sizeof(buf) - 1;
-	char prev = 0;
-
-	while (p < end && n < e) prev = *n++ = *p++;
-	while (*p) {
-	    if (*p == '_') {
-		/* remove an underscore between digits */
-		if (n == buf || !ISDIGIT(prev) || (++p, !ISDIGIT(*p))) {
-		    if (badcheck) goto bad;
-		    break;
-		}
-	    }
-	    prev = *p++;
-	    if (n < e) *n++ = prev;
-	}
-	*n = '\0';
-	p = buf;
-
-	if (!badcheck && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
-	    return 0.0;
-	}
-
-	d = strtod(p, &end);
-	if (errno == ERANGE) {
-	    OutOfRange();
-	    rb_warning("Float %.*s%s out of range", w, p, ellipsis);
-	    errno = 0;
-	}
-	if (badcheck) {
-	    if (!end || p == end) goto bad;
-	    while (*end && ISSPACE(*end)) end++;
-	    if (*end) goto bad;
-	}
-    }
-    if (errno == ERANGE) {
-	errno = 0;
-	OutOfRange();
-	rb_raise(rb_eArgError, "Float %.*s%s out of range", w, q, ellipsis);
-    }
-    return d;
+    return rb_cstr_to_dbl_raise(p, badcheck, TRUE, NULL);
 }
+
+static double
+rb_str_to_dbl_raise(VALUE str, int badcheck, int raise, int *error)
+{
+    char *s;
+    long len;
+    double ret;
+    VALUE v = 0;
+
+    StringValue(str);
+    s = RSTRING_PTR(str);
+    len = RSTRING_LEN(str);
+    if (s) {
+	if (badcheck && memchr(s, '\0', len)) {
+            if (raise)
+                rb_raise(rb_eArgError, "string for Float contains null byte");
+            else {
+                if (error) *error = 1;
+                return 0.0;
+            }
+	}
+	if (s[len]) {		/* no sentinel somehow */
+	    char *p = ALLOCV(v, (size_t)len + 1);
+	    MEMCPY(p, s, char, len);
+	    p[len] = '\0';
+	    s = p;
+	}
+    }
+    ret = rb_cstr_to_dbl_raise(s, badcheck, raise, error);
+    if (v)
+	ALLOCV_END(v);
+    return ret;
+}
+
+FUNC_MINIMIZED(double rb_str_to_dbl(VALUE str, int badcheck));
 
 /*!
  * Parses a string representation of a floating point number.
@@ -3297,29 +3378,7 @@ rb_cstr_to_dbl(const char *p, int badcheck)
 double
 rb_str_to_dbl(VALUE str, int badcheck)
 {
-    char *s;
-    long len;
-    double ret;
-    VALUE v = 0;
-
-    StringValue(str);
-    s = RSTRING_PTR(str);
-    len = RSTRING_LEN(str);
-    if (s) {
-	if (badcheck && memchr(s, '\0', len)) {
-	    rb_raise(rb_eArgError, "string for Float contains null byte");
-	}
-	if (s[len]) {		/* no sentinel somehow */
-	    char *p = ALLOCV(v, (size_t)len + 1);
-	    MEMCPY(p, s, char, len);
-	    p[len] = '\0';
-	    s = p;
-	}
-    }
-    ret = rb_cstr_to_dbl(s, badcheck);
-    if (v)
-	ALLOCV_END(v);
-    return ret;
+    return rb_str_to_dbl_raise(str, badcheck, TRUE, NULL);
 }
 
 /*! \cond INTERNAL_MACRO */
@@ -3355,7 +3414,7 @@ implicit_conversion_to_float(VALUE val)
 }
 
 static int
-to_float(VALUE *valp)
+to_float(VALUE *valp, int raise_exception)
 {
     VALUE val = *valp;
     if (SPECIAL_CONST_P(val)) {
@@ -3366,7 +3425,7 @@ to_float(VALUE *valp)
 	else if (FLONUM_P(val)) {
 	    return T_FLOAT;
 	}
-	else {
+	else if (raise_exception) {
 	    conversion_to_float(val);
 	}
     }
@@ -3388,6 +3447,42 @@ to_float(VALUE *valp)
     return T_NONE;
 }
 
+static VALUE
+convert_type_to_float_protected(VALUE val)
+{
+    return rb_convert_type_with_id(val, T_FLOAT, "Float", id_to_f);
+}
+
+static VALUE
+rb_convert_to_float(VALUE val, int raise_exception)
+{
+    switch (to_float(&val, raise_exception)) {
+      case T_FLOAT:
+	return val;
+      case T_STRING:
+        if (!raise_exception) {
+            int e = 0;
+            double x = rb_str_to_dbl_raise(val, TRUE, raise_exception, &e);
+            return e ? Qnil : DBL2NUM(x);
+        }
+        return DBL2NUM(rb_str_to_dbl(val, TRUE));
+      case T_NONE:
+        if (SPECIAL_CONST_P(val) && !raise_exception)
+            return Qnil;
+    }
+
+    if (!raise_exception) {
+        int state;
+        VALUE result = rb_protect(convert_type_to_float_protected, val, &state);
+        if (state) rb_set_errinfo(Qnil);
+        return result;
+    }
+
+    return rb_convert_type_with_id(val, T_FLOAT, "Float", id_to_f);
+}
+
+FUNC_MINIMIZED(VALUE rb_Float(VALUE val));
+
 /*!
  * Equivalent to \c Kernel\#Float in Ruby.
  *
@@ -3397,16 +3492,8 @@ to_float(VALUE *valp)
 VALUE
 rb_Float(VALUE val)
 {
-    switch (to_float(&val)) {
-      case T_FLOAT:
-	return val;
-      case T_STRING:
-	return DBL2NUM(rb_str_to_dbl(val, TRUE));
-    }
-    return rb_convert_type(val, T_FLOAT, "Float", "to_f");
+    return rb_convert_to_float(val, TRUE);
 }
-
-FUNC_MINIMIZED(static VALUE rb_f_float(VALUE obj, VALUE arg)); /*!< \private */
 
 /*
  *  call-seq:
@@ -3424,9 +3511,12 @@ FUNC_MINIMIZED(static VALUE rb_f_float(VALUE obj, VALUE arg)); /*!< \private */
  */
 
 static VALUE
-rb_f_float(VALUE obj, VALUE arg)
+rb_f_float(int argc, VALUE *argv, VALUE obj)
 {
-    return rb_Float(arg);
+    VALUE arg = Qnil, opts = Qnil;
+
+    rb_scan_args(argc, argv, "1:", &arg, &opts);
+    return rb_convert_to_float(arg, opts_exception_p(opts));
 }
 
 static VALUE
@@ -3436,7 +3526,7 @@ numeric_to_float(VALUE val)
 	rb_raise(rb_eTypeError, "can't convert %"PRIsVALUE" into Float",
 		 rb_obj_class(val));
     }
-    return rb_convert_type(val, T_FLOAT, "Float", "to_f");
+    return rb_convert_type_with_id(val, T_FLOAT, "Float", id_to_f);
 }
 
 /*!
@@ -3447,7 +3537,7 @@ numeric_to_float(VALUE val)
 VALUE
 rb_to_float(VALUE val)
 {
-    switch (to_float(&val)) {
+    switch (to_float(&val, TRUE)) {
       case T_FLOAT:
 	return val;
     }
@@ -3468,10 +3558,8 @@ rb_check_to_float(VALUE val)
     if (!rb_obj_is_kind_of(val, rb_cNumeric)) {
 	return Qnil;
     }
-    return rb_check_convert_type(val, T_FLOAT, "Float", "to_f");
+    return rb_check_convert_type_with_id(val, T_FLOAT, "Float", id_to_f);
 }
-
-static ID id_to_f;
 
 static inline int
 basic_to_f_p(VALUE klass)
@@ -3546,7 +3634,7 @@ rb_num2dbl(VALUE val)
 	    rb_raise(rb_eTypeError, "no implicit conversion to float from string");
 	}
     }
-    val = rb_convert_type(val, T_FLOAT, "Float", "to_f");
+    val = rb_convert_type_with_id(val, T_FLOAT, "Float", id_to_f);
     return RFLOAT_VALUE(val);
 }
 
@@ -3594,7 +3682,7 @@ rb_Array(VALUE val)
     VALUE tmp = rb_check_array_type(val);
 
     if (NIL_P(tmp)) {
-	tmp = rb_check_convert_type_with_id(val, T_ARRAY, "Array", idTo_a);
+	tmp = rb_check_to_array(val);
 	if (NIL_P(tmp)) {
 	    return rb_ary_new3(1, val);
 	}
@@ -3985,7 +4073,7 @@ InitVM_Object(void)
     rb_define_global_function("format", rb_f_sprintf, -1);  /* in sprintf.c */
 
     rb_define_global_function("Integer", rb_f_integer, -1);
-    rb_define_global_function("Float", rb_f_float, 1);
+    rb_define_global_function("Float", rb_f_float, -1);
 
     rb_define_global_function("String", rb_f_string, 1);
     rb_define_global_function("Array", rb_f_array, 1);
@@ -4117,7 +4205,6 @@ InitVM_Object(void)
 void
 Init_Object(void)
 {
-    id_to_f = rb_intern_const("to_f");
     id_dig = rb_intern_const("dig");
     InitVM(Object);
 }

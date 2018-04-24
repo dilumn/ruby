@@ -33,7 +33,7 @@ typedef enum {
 } rb_method_visibility_t;
 
 typedef struct rb_scope_visi_struct {
-    rb_method_visibility_t method_visi : 3;
+    BITFIELD(rb_method_visibility_t) method_visi : 3;
     unsigned int module_func : 1;
 } rb_scope_visibility_t;
 
@@ -114,6 +114,8 @@ typedef enum {
 
     END_OF_ENUMERATION(VM_METHOD_TYPE)
 } rb_method_type_t;
+#define VM_METHOD_TYPE_MINIMUM_BITS 4
+/* TODO: STATIC_ASSERT for VM_METHOD_TYPE_MINIMUM_BITS */
 
 #ifndef rb_iseq_t
 typedef struct rb_iseq_struct rb_iseq_t;
@@ -148,11 +150,12 @@ typedef struct rb_method_refined_struct {
 enum method_optimized_type {
     OPTIMIZED_METHOD_TYPE_SEND,
     OPTIMIZED_METHOD_TYPE_CALL,
+    OPTIMIZED_METHOD_TYPE_BLOCK_CALL,
     OPTIMIZED_METHOD_TYPE__MAX
 };
 
 PACKED_STRUCT_UNALIGNED(struct rb_method_definition_struct {
-    unsigned int type :  4; /* method type */
+    BITFIELD(rb_method_type_t) type : VM_METHOD_TYPE_MINIMUM_BITS;
     int alias_count : 28;
     int complemented_count : 28;
 
@@ -190,6 +193,9 @@ const rb_method_entry_t *rb_method_entry_at(VALUE obj, ID id);
 const rb_method_entry_t *rb_method_entry(VALUE klass, ID id);
 const rb_method_entry_t *rb_method_entry_without_refinements(VALUE klass, ID id, VALUE *defined_class);
 const rb_method_entry_t *rb_resolve_refined_method(VALUE refinements, const rb_method_entry_t *me);
+RUBY_SYMBOL_EXPORT_BEGIN
+const rb_method_entry_t *rb_resolve_me_location(const rb_method_entry_t *, VALUE[5]);
+RUBY_SYMBOL_EXPORT_END
 
 const rb_callable_method_entry_t *rb_callable_method_entry(VALUE klass, ID id);
 const rb_callable_method_entry_t *rb_callable_method_entry_with_refinements(VALUE klass, ID id, VALUE *defined_class);

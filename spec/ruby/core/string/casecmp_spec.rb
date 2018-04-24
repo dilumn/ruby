@@ -1,6 +1,6 @@
 # -*- encoding: utf-8 -*-
-require File.expand_path('../../../spec_helper', __FILE__)
-require File.expand_path('../fixtures/classes.rb', __FILE__)
+require_relative '../../spec_helper'
+require_relative 'fixtures/classes'
 
 describe "String#casecmp independent of case" do
   it "returns -1 when less than other" do
@@ -178,6 +178,18 @@ ruby_version_is "2.4" do
         it "returns true when they have the same bytes" do
           @upper_a_tilde.casecmp?(@upper_a_tilde).should == true
         end
+      end
+    end
+
+    ruby_version_is "2.4" ... "2.5" do
+      it "raises a TypeError if other can't be converted to a string" do
+        lambda { "abc".casecmp?(mock('abc')) }.should raise_error(TypeError)
+      end
+    end
+
+    ruby_version_is "2.5" do
+      it "returns nil if other can't be converted to a string" do
+        "abc".casecmp?(mock('abc')).should be_nil
       end
     end
   end

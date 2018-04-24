@@ -1,5 +1,5 @@
-require File.expand_path('../../../spec_helper', __FILE__)
-require File.expand_path('../fixtures/classes', __FILE__)
+require_relative '../../spec_helper'
+require_relative 'fixtures/classes'
 require 'thread'
 
 describe "Module#autoload?" do
@@ -329,8 +329,8 @@ describe "Module#autoload" do
   end
 
   describe "on a frozen module" do
-    it "raises a RuntimeError before setting the name" do
-      lambda { @frozen_module.autoload :Foo, @non_existent }.should raise_error(RuntimeError)
+    it "raises a #{frozen_error_class} before setting the name" do
+      lambda { @frozen_module.autoload :Foo, @non_existent }.should raise_error(frozen_error_class)
       @frozen_module.should_not have_constant(:Foo)
     end
   end

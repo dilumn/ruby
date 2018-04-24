@@ -9,8 +9,9 @@
 
 **********************************************************************/
 
-#include "internal.h"
+#include "ruby/encoding.h"
 #include "ruby/st.h"
+#include "internal.h"
 #include "ruby_assert.h"
 #include "vm_core.h"
 
@@ -52,8 +53,8 @@ int rb_str_end_with_asciichar(VALUE str, int c);
 VALUE rb_eEAGAIN;
 VALUE rb_eEWOULDBLOCK;
 VALUE rb_eEINPROGRESS;
-VALUE rb_mWarning;
-VALUE rb_cWarningBuffer;
+static VALUE rb_mWarning;
+static VALUE rb_cWarningBuffer;
 
 static ID id_warn;
 
@@ -297,6 +298,7 @@ end_with_asciichar(VALUE str, int c)
 	rb_str_end_with_asciichar(str, c);
 }
 
+/* :nodoc: */
 static VALUE
 warning_write(int argc, VALUE *argv, VALUE buf)
 {
@@ -322,15 +324,72 @@ warning_write(int argc, VALUE *argv, VALUE buf)
  *
  *    warning 1
  *    warning 2
+ *
+ * If the <code>uplevel</code> keyword argument is given, the string will
+ * be prepended with information for the given caller frame in
+ * the same format used by the <code>rb_warn</code> C function.
+ *
+ *    # In baz.rb
+ *    def foo
+ *      warn("invalid call to foo", uplevel: 1)
+ *    end
+ *
+ *    def bar
+ *      foo
+ *    end
+ *
+ *    bar
+ *
+ *  <em>produces:</em>
+ *
+ *    baz.rb:6: warning: invalid call to foo
  */
 
 static VALUE
 rb_warn_m(int argc, VALUE *argv, VALUE exc)
 {
-    if (!NIL_P(ruby_verbose) && argc > 0) {
-	VALUE str = argv[0];
-	if (argc > 1 || !end_with_asciichar(str, '\n')) {
-	    str = rb_str_tmp_new(0);
+    VALUE opts, location = Qnil;
+
+    if (!NIL_P(ruby_verbose) && argc > 0 &&
+	    (argc = rb_scan_args(argc, argv, "*:", NULL, &opts)) > 0) {
+	VALUE str = argv[0], uplevel = Qnil;
+	if (!NIL_P(opts)) {
+	    static ID kwds[1];
+	    if (!kwds[0]) {
+		CONST_ID(kwds[0], "uplevel");
+	    }
+	    rb_get_kwargs(opts, kwds, 0, 1, &uplevel);
+	    if (uplevel == Qundef) {
+		uplevel = Qnil;
+	    }
+	    else if (!NIL_P(uplevel)) {
+		VALUE args[2];
+		long lev = NUM2LONG(uplevel);
+		if (lev < 0) {
+		    rb_raise(rb_eArgError, "negative level (%ld)", lev);
+		}
+		args[0] = LONG2NUM(lev + 1);
+		args[1] = INT2FIX(1);
+		location = rb_vm_thread_backtrace_locations(2, args, GET_THREAD()->self);
+		if (!NIL_P(uplevel)) {
+		    location = rb_ary_entry(location, 0);
+		}
+	    }
+	}
+	if (argc > 1 || !NIL_P(uplevel) || !end_with_asciichar(str, '\n')) {
+	    VALUE path;
+	    if (NIL_P(uplevel)) {
+		str = rb_str_tmp_new(0);
+	    }
+	    else if (NIL_P(location) ||
+		     NIL_P(path = rb_funcall(location, rb_intern("path"), 0))) {
+		str = rb_str_new_cstr("warning: ");
+	    }
+	    else {
+		str = rb_sprintf("%s:%ld: warning: ",
+		    rb_string_value_ptr(&path),
+		    NUM2LONG(rb_funcall(location, rb_intern("lineno"), 0)));
+	    }
 	    RBASIC_SET_CLASS(str, rb_cWarningBuffer);
 	    rb_io_puts(argc, argv, str);
 	    RBASIC_SET_CLASS(str, rb_cString);
@@ -605,7 +664,7 @@ rb_report_bug_valist(VALUE file, int line, const char *fmt, va_list args)
     report_bug_valist(RSTRING_PTR(file), line, fmt, NULL, args);
 }
 
-void
+MJIT_FUNC_EXPORTED void
 rb_assert_failure(const char *file, int line, const char *name, const char *expr)
 {
     FILE *out = stderr;
@@ -804,6 +863,7 @@ VALUE rb_eSignal;
 VALUE rb_eFatal;
 VALUE rb_eStandardError;
 VALUE rb_eRuntimeError;
+VALUE rb_eFrozenError;
 VALUE rb_eTypeError;
 VALUE rb_eArgError;
 VALUE rb_eIndexError;
@@ -826,22 +886,21 @@ VALUE rb_eSystemCallError;
 VALUE rb_mErrno;
 static VALUE rb_eNOERROR;
 
-static ID id_new, id_cause, id_message, id_backtrace;
+static ID id_cause, id_message, id_backtrace;
 static ID id_name, id_key, id_args, id_Errno, id_errno, id_i_path;
-static ID id_receiver, id_iseq, id_local_variables;
-static ID id_private_call_p;
-extern ID ruby_static_id_status;
+static ID id_receiver, id_recv, id_iseq, id_local_variables;
+static ID id_private_call_p, id_top, id_bottom;
 #define id_bt idBt
 #define id_bt_locations idBt_locations
 #define id_mesg idMesg
-#define id_status ruby_static_id_status
 
 #undef rb_exc_new_cstr
 
 VALUE
 rb_exc_new(VALUE etype, const char *ptr, long len)
 {
-    return rb_funcall(etype, id_new, 1, rb_str_new(ptr, len));
+    VALUE mesg = rb_str_new(ptr, len);
+    return rb_class_new_instance(1, &mesg, etype);
 }
 
 VALUE
@@ -854,7 +913,16 @@ VALUE
 rb_exc_new_str(VALUE etype, VALUE str)
 {
     StringValue(str);
-    return rb_funcall(etype, id_new, 1, str);
+    return rb_class_new_instance(1, &str, etype);
+}
+
+static VALUE
+exc_init(VALUE exc, VALUE mesg)
+{
+    rb_ivar_set(exc, id_mesg, mesg);
+    rb_ivar_set(exc, id_bt, Qnil);
+
+    return exc;
 }
 
 /*
@@ -871,10 +939,7 @@ exc_initialize(int argc, VALUE *argv, VALUE exc)
     VALUE arg;
 
     rb_scan_args(argc, argv, "01", &arg);
-    rb_ivar_set(exc, id_mesg, arg);
-    rb_ivar_set(exc, id_bt, Qnil);
-
-    return exc;
+    return exc_init(exc, arg);
 }
 
 /*
@@ -920,6 +985,93 @@ exc_to_s(VALUE exc)
     return rb_String(mesg);
 }
 
+/* FIXME: Include eval_error.c */
+void rb_error_write(VALUE errinfo, VALUE emesg, VALUE errat, VALUE str, VALUE highlight, VALUE reverse);
+
+VALUE
+rb_get_message(VALUE exc)
+{
+    VALUE e = rb_check_funcall(exc, id_message, 0, 0);
+    if (e == Qundef) return Qnil;
+    if (!RB_TYPE_P(e, T_STRING)) e = rb_check_string_type(e);
+    return e;
+}
+
+/*
+ * call-seq:
+ *    Exception.to_tty?   ->  true or false
+ *
+ * Returns +true+ if exception messages will be sent to a tty.
+ */
+static VALUE
+exc_s_to_tty_p(VALUE self)
+{
+    return rb_stderr_tty_p() ? Qtrue : Qfalse;
+}
+
+/*
+ * call-seq:
+ *   exception.full_message(highlight: bool, order: [:top or :bottom]) ->  string
+ *
+ * Returns formatted string of _exception_.
+ * The returned string is formatted using the same format that Ruby uses
+ * when printing an uncaught exceptions to stderr.
+ *
+ * If _highlight_ is +true+ the default error handler will send the
+ * messages to a tty.
+ *
+ * _order_ must be either of +:top+ or +:bottom+, and places the error
+ * message and the innermost backtrace come at the top or the bottom.
+ *
+ * The default values of these options depend on <code>$stderr</code>
+ * and its +tty?+ at the timing of a call.
+ */
+
+static VALUE
+exc_full_message(int argc, VALUE *argv, VALUE exc)
+{
+    VALUE opt, str, emesg, errat;
+    enum {kw_highlight, kw_order, kw_max_};
+    static ID kw[kw_max_];
+    VALUE args[kw_max_] = {Qnil, Qnil};
+
+    rb_scan_args(argc, argv, "0:", &opt);
+    if (!NIL_P(opt)) {
+	if (!kw[0]) {
+#define INIT_KW(n) kw[kw_##n] = rb_intern_const(#n)
+	    INIT_KW(highlight);
+	    INIT_KW(order);
+#undef INIT_KW
+	}
+	rb_get_kwargs(opt, kw, 0, kw_max_, args);
+	switch (args[kw_highlight]) {
+	  default:
+	    rb_raise(rb_eArgError, "expected true or false as "
+		     "highlight: %+"PRIsVALUE, args[kw_highlight]);
+	  case Qundef: args[kw_highlight] = Qnil; break;
+	  case Qtrue: case Qfalse: case Qnil: break;
+	}
+	if (args[kw_order] == Qundef) {
+	    args[kw_order] = Qnil;
+	}
+	else {
+	    ID id = rb_check_id(&args[kw_order]);
+	    if (id == id_bottom) args[kw_order] = Qtrue;
+	    else if (id == id_top) args[kw_order] = Qfalse;
+	    else {
+		rb_raise(rb_eArgError, "expected :top or :down as "
+			 "order: %+"PRIsVALUE, args[kw_order]);
+	    }
+	}
+    }
+    str = rb_str_new2("");
+    errat = rb_get_backtrace(exc);
+    emesg = rb_get_message(exc);
+
+    rb_error_write(exc, emesg, errat, str, args[kw_highlight], args[kw_order]);
+    return str;
+}
+
 /*
  * call-seq:
  *   exception.message   ->  string
@@ -938,7 +1090,7 @@ exc_message(VALUE exc)
  * call-seq:
  *   exception.inspect   -> string
  *
- * Return this exception's class name and message
+ * Return this exception's class name and message.
  */
 
 static VALUE
@@ -1085,7 +1237,7 @@ exc_set_backtrace(VALUE exc, VALUE bt)
     return rb_ivar_set(exc, id_bt, rb_check_backtrace(bt));
 }
 
-VALUE
+MJIT_FUNC_EXPORTED VALUE
 rb_exc_set_backtrace(VALUE exc, VALUE bt)
 {
     return exc_set_backtrace(exc, bt);
@@ -1275,9 +1427,21 @@ rb_name_error_str(VALUE str, const char *fmt, ...)
     rb_exc_raise(exc);
 }
 
+static VALUE
+name_err_init_attr(VALUE exc, VALUE recv, VALUE method)
+{
+    const rb_execution_context_t *ec = GET_EC();
+    rb_control_frame_t *cfp = RUBY_VM_PREVIOUS_CONTROL_FRAME(ec->cfp);
+    cfp = rb_vm_get_ruby_level_next_cfp(ec, cfp);
+    rb_ivar_set(exc, id_name, method);
+    if (recv != Qundef) rb_ivar_set(exc, id_recv, recv);
+    if (cfp) rb_ivar_set(exc, id_iseq, rb_iseqw_new(cfp->iseq));
+    return exc;
+}
+
 /*
  * call-seq:
- *   NameError.new([msg, *, name])  -> name_error
+ *   NameError.new(msg [, name])  -> name_error
  *
  * Construct a new NameError exception. If given the <i>name</i>
  * parameter may subsequently be examined using the <code>NameError.name</code>
@@ -1287,20 +1451,30 @@ rb_name_error_str(VALUE str, const char *fmt, ...)
 static VALUE
 name_err_initialize(int argc, VALUE *argv, VALUE self)
 {
-    VALUE name;
-    VALUE iseqw = Qnil;
+    ID keywords[1];
+    VALUE values[numberof(keywords)], name, options;
 
+    argc = rb_scan_args(argc, argv, "*:", NULL, &options);
+    keywords[0] = id_receiver;
+    rb_get_kwargs(options, keywords, 0, numberof(values), values);
     name = (argc > 1) ? argv[--argc] : Qnil;
     rb_call_super(argc, argv);
-    rb_ivar_set(self, id_name, name);
-    {
-	const rb_execution_context_t *ec = GET_EC();
-	rb_control_frame_t *cfp =
-	    rb_vm_get_ruby_level_next_cfp(ec, RUBY_VM_PREVIOUS_CONTROL_FRAME(ec->cfp));
-	if (cfp) iseqw = rb_iseqw_new(cfp->iseq);
-    }
-    rb_ivar_set(self, id_iseq, iseqw);
+    name_err_init_attr(self, values[0], name);
     return self;
+}
+
+static VALUE
+name_err_init(VALUE exc, VALUE mesg, VALUE recv, VALUE method)
+{
+    exc_init(exc, rb_name_err_mesg_new(mesg, recv, method));
+    return name_err_init_attr(exc, recv, method);
+}
+
+VALUE
+rb_name_err_new(VALUE mesg, VALUE recv, VALUE method)
+{
+    VALUE exc = rb_obj_alloc(rb_eNameError);
+    return name_err_init(exc, mesg, recv, method);
 }
 
 /*
@@ -1340,9 +1514,17 @@ name_err_local_variables(VALUE self)
     return vars;
 }
 
+static VALUE
+nometh_err_init_attr(VALUE exc, VALUE args, int priv)
+{
+    rb_ivar_set(exc, id_args, args);
+    rb_ivar_set(exc, id_private_call_p, priv ? Qtrue : Qfalse);
+    return exc;
+}
+
 /*
  * call-seq:
- *   NoMethodError.new([msg, *, name [, args]])  -> no_method_error
+ *   NoMethodError.new([msg, *, name [, args [, priv]]])  -> no_method_error
  *
  * Construct a NoMethodError exception for a method of the given name
  * called with the given arguments. The name may be accessed using
@@ -1353,12 +1535,22 @@ name_err_local_variables(VALUE self)
 static VALUE
 nometh_err_initialize(int argc, VALUE *argv, VALUE self)
 {
-    VALUE priv = (argc > 3) && (--argc, RTEST(argv[argc])) ? Qtrue : Qfalse;
-    VALUE args = (argc > 2) ? argv[--argc] : Qnil;
-    name_err_initialize(argc, argv, self);
-    rb_ivar_set(self, id_args, args);
-    rb_ivar_set(self, id_private_call_p, RTEST(priv) ? Qtrue : Qfalse);
-    return self;
+    int priv;
+    VALUE args, options;
+    argc = rb_scan_args(argc, argv, "*:", NULL, &options);
+    priv = (argc > 3) && (--argc, RTEST(argv[argc]));
+    args = (argc > 2) ? argv[--argc] : Qnil;
+    if (!NIL_P(options)) argv[argc++] = options;
+    rb_call_super(argc, argv);
+    return nometh_err_init_attr(self, args, priv);
+}
+
+VALUE
+rb_nomethod_err_new(VALUE mesg, VALUE recv, VALUE method, VALUE args, int priv)
+{
+    VALUE exc = rb_obj_alloc(rb_eNoMethodError);
+    name_err_init(exc, mesg, recv, method);
+    return nometh_err_init_attr(exc, args, priv);
 }
 
 /* :nodoc: */
@@ -1406,17 +1598,6 @@ rb_name_err_mesg_new(VALUE mesg, VALUE recv, VALUE method)
     ptr[NAME_ERR_MESG__NAME] = method;
     RTYPEDDATA_DATA(result) = ptr;
     return result;
-}
-
-VALUE
-rb_name_err_new(VALUE mesg, VALUE recv, VALUE method)
-{
-    VALUE exc = rb_obj_alloc(rb_eNameError);
-    rb_ivar_set(exc, id_mesg, rb_name_err_mesg_new(mesg, recv, method));
-    rb_ivar_set(exc, id_bt, Qnil);
-    rb_ivar_set(exc, id_name, method);
-    rb_ivar_set(exc, id_receiver, recv);
-    return exc;
 }
 
 /* :nodoc: */
@@ -1519,7 +1700,7 @@ name_err_receiver(VALUE self)
 {
     VALUE *ptr, recv, mesg;
 
-    recv = rb_ivar_lookup(self, id_receiver, Qundef);
+    recv = rb_ivar_lookup(self, id_recv, Qundef);
     if (recv != Qundef) return recv;
 
     mesg = rb_attr_get(self, id_mesg);
@@ -1544,6 +1725,13 @@ nometh_err_args(VALUE self)
     return rb_attr_get(self, id_args);
 }
 
+/*
+ * call-seq:
+ *   no_method_error.private_call?  -> true or false
+ *
+ * Return true if the caused method was called as private.
+ */
+
 static VALUE
 nometh_err_private_call_p(VALUE self)
 {
@@ -1558,6 +1746,13 @@ rb_invalid_str(const char *str, const char *type)
     rb_raise(rb_eArgError, "invalid value for %s: %+"PRIsVALUE, type, s);
 }
 
+/*
+ * call-seq:
+ *   key_error.receiver  -> object
+ *
+ * Return the receiver associated with this KeyError exception.
+ */
+
 static VALUE
 key_err_receiver(VALUE self)
 {
@@ -1567,6 +1762,13 @@ key_err_receiver(VALUE self)
     if (recv != Qundef) return recv;
     rb_raise(rb_eArgError, "no receiver is available");
 }
+
+/*
+ * call-seq:
+ *   key_error.key  -> object
+ *
+ * Return the key caused this KeyError exception.
+ */
 
 static VALUE
 key_err_key(VALUE self)
@@ -1587,6 +1789,38 @@ rb_key_err_new(VALUE mesg, VALUE recv, VALUE key)
     rb_ivar_set(exc, id_key, key);
     rb_ivar_set(exc, id_receiver, recv);
     return exc;
+}
+
+/*
+ * call-seq:
+ *   KeyError.new(message=nil, receiver: nil, key: nil) -> key_error
+ *
+ * Construct a new +KeyError+ exception with the given message,
+ * receiver and key.
+ */
+
+static VALUE
+key_err_initialize(int argc, VALUE *argv, VALUE self)
+{
+    VALUE options;
+
+    rb_call_super(rb_scan_args(argc, argv, "01:", NULL, &options), argv);
+
+    if (!NIL_P(options)) {
+	ID keywords[2];
+	VALUE values[numberof(keywords)];
+	int i;
+	keywords[0] = id_receiver;
+	keywords[1] = id_key;
+	rb_get_kwargs(options, keywords, 0, numberof(values), values);
+	for (i = 0; i < numberof(values); ++i) {
+	    if (values[i] != Qundef) {
+		rb_ivar_set(self, keywords[i], values[i]);
+	    }
+	}
+    }
+
+    return self;
 }
 
 /*
@@ -2011,16 +2245,21 @@ syserr_eqq(VALUE self, VALUE exc)
  */
 
 /*
- *  Document-class: RuntimeError
+ *  Document-class: FrozenError
  *
- *  A generic error class raised when an invalid operation is attempted.
+ *  Raised when there is an attempt to modify a frozen object.
  *
  *     [1, 2, 3].freeze << 4
  *
  *  <em>raises the exception:</em>
  *
- *     RuntimeError: can't modify frozen Array
+ *     FrozenError: can't modify frozen Array
+ */
+
+/*
+ *  Document-class: RuntimeError
  *
+ *  A generic error class raised when an invalid operation is attempted.
  *  Kernel#raise will raise a RuntimeError if no Exception class is
  *  specified.
  *
@@ -2163,6 +2402,7 @@ syserr_eqq(VALUE self, VALUE exc)
  *      * FloatDomainError
  *    * RegexpError
  *    * RuntimeError -- default for +raise+
+ *      * FrozenError
  *    * SystemCallError
  *      * Errno::*
  *    * ThreadError
@@ -2178,11 +2418,13 @@ Init_Exception(void)
 {
     rb_eException   = rb_define_class("Exception", rb_cObject);
     rb_define_singleton_method(rb_eException, "exception", rb_class_new_instance, -1);
+    rb_define_singleton_method(rb_eException, "to_tty?", exc_s_to_tty_p, 0);
     rb_define_method(rb_eException, "exception", exc_exception, -1);
     rb_define_method(rb_eException, "initialize", exc_initialize, -1);
     rb_define_method(rb_eException, "==", exc_equal, 1);
     rb_define_method(rb_eException, "to_s", exc_to_s, 0);
     rb_define_method(rb_eException, "message", exc_message, 0);
+    rb_define_method(rb_eException, "full_message", exc_full_message, -1);
     rb_define_method(rb_eException, "inspect", exc_inspect, 0);
     rb_define_method(rb_eException, "backtrace", exc_backtrace, 0);
     rb_define_method(rb_eException, "backtrace_locations", exc_backtrace_locations, 0);
@@ -2203,6 +2445,7 @@ Init_Exception(void)
     rb_eArgError      = rb_define_class("ArgumentError", rb_eStandardError);
     rb_eIndexError    = rb_define_class("IndexError", rb_eStandardError);
     rb_eKeyError      = rb_define_class("KeyError", rb_eIndexError);
+    rb_define_method(rb_eKeyError, "initialize", key_err_initialize, -1);
     rb_define_method(rb_eKeyError, "receiver", key_err_receiver, 0);
     rb_define_method(rb_eKeyError, "key", key_err_key, 0);
     rb_eRangeError    = rb_define_class("RangeError", rb_eStandardError);
@@ -2233,6 +2476,7 @@ Init_Exception(void)
     rb_define_method(rb_eNoMethodError, "private_call?", nometh_err_private_call_p, 0);
 
     rb_eRuntimeError = rb_define_class("RuntimeError", rb_eStandardError);
+    rb_eFrozenError = rb_define_class("FrozenError", rb_eRuntimeError);
     rb_eSecurityError = rb_define_class("SecurityError", rb_eException);
     rb_eNoMemError = rb_define_class("NoMemoryError", rb_eException);
     rb_eEncodingError = rb_define_class("EncodingError", rb_eStandardError);
@@ -2250,12 +2494,12 @@ Init_Exception(void)
     rb_define_method(rb_mWarning, "warn", rb_warning_s_warn, 1);
     rb_extend_object(rb_mWarning, rb_mWarning);
 
+    /* :nodoc: */
     rb_cWarningBuffer = rb_define_class_under(rb_mWarning, "buffer", rb_cString);
     rb_define_method(rb_cWarningBuffer, "write", warning_write, -1);
 
     rb_define_global_function("warn", rb_warn_m, -1);
 
-    id_new = rb_intern_const("new");
     id_cause = rb_intern_const("cause");
     id_message = rb_intern_const("message");
     id_backtrace = rb_intern_const("backtrace");
@@ -2269,7 +2513,10 @@ Init_Exception(void)
     id_errno = rb_intern_const("errno");
     id_i_path = rb_intern_const("@path");
     id_warn = rb_intern_const("warn");
+    id_top = rb_intern_const("top");
+    id_bottom = rb_intern_const("bottom");
     id_iseq = rb_make_internal_id();
+    id_recv = rb_make_internal_id();
 }
 
 void
@@ -2588,7 +2835,7 @@ rb_load_fail(VALUE path, const char *err)
 void
 rb_error_frozen(const char *what)
 {
-    rb_raise(rb_eRuntimeError, "can't modify frozen %s", what);
+    rb_raise(rb_eFrozenError, "can't modify frozen %s", what);
 }
 
 void
@@ -2601,11 +2848,11 @@ rb_error_frozen_object(VALUE frozen_obj)
 	VALUE path = rb_ary_entry(debug_info, 0);
 	VALUE line = rb_ary_entry(debug_info, 1);
 
-	rb_raise(rb_eRuntimeError, "can't modify frozen %"PRIsVALUE", created at %"PRIsVALUE":%"PRIsVALUE,
+	rb_raise(rb_eFrozenError, "can't modify frozen %"PRIsVALUE", created at %"PRIsVALUE":%"PRIsVALUE,
 		 CLASS_OF(frozen_obj), path, line);
     }
     else {
-	rb_raise(rb_eRuntimeError, "can't modify frozen %"PRIsVALUE,
+	rb_raise(rb_eFrozenError, "can't modify frozen %"PRIsVALUE,
 		 CLASS_OF(frozen_obj));
     }
 }

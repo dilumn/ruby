@@ -3,6 +3,7 @@ require 'test/unit'
 
 require 'tmpdir'
 require 'tempfile'
+require_relative '../lib/jit_support'
 
 class TestRubyOptions < Test::Unit::TestCase
   def write_file(filename, content)
@@ -26,7 +27,7 @@ class TestRubyOptions < Test::Unit::TestCase
 
   def test_usage
     assert_in_out_err(%w(-h)) do |r, e|
-      assert_operator(r.size, :<=, 24)
+      assert_operator(r.size, :<=, 25)
       longer = r[1..-1].select {|x| x.size > 80}
       assert_equal([], longer)
       assert_equal([], e)
@@ -96,6 +97,15 @@ class TestRubyOptions < Test::Unit::TestCase
     end
   private_constant :VERSION_PATTERN
 
+  VERSION_PATTERN_WITH_JIT =
+    case RUBY_ENGINE
+    when 'ruby'
+      /^ruby #{q[RUBY_VERSION]}(?:[p ]|dev|rc).*? \+JIT \[#{q[RUBY_PLATFORM]}\]$/
+    else
+      VERSION_PATTERN
+    end
+  private_constant :VERSION_PATTERN_WITH_JIT
+
   def test_verbose
     assert_in_out_err(["-vve", ""]) do |r, e|
       assert_match(VERSION_PATTERN, r[0])
@@ -155,8 +165,23 @@ class TestRubyOptions < Test::Unit::TestCase
   def test_version
     assert_in_out_err(%w(--version)) do |r, e|
       assert_match(VERSION_PATTERN, r[0])
-      assert_equal(RUBY_DESCRIPTION, r[0])
+      if RubyVM::MJIT.enabled?
+        assert_equal(EnvUtil.invoke_ruby(['-e', 'print RUBY_DESCRIPTION'], '', true).first, r[0])
+      else
+        assert_equal(RUBY_DESCRIPTION, r[0])
+      end
       assert_equal([], e)
+    end
+    if JITSupport.supported?
+      assert_in_out_err(%w(--version --jit)) do |r, e|
+        assert_match(VERSION_PATTERN_WITH_JIT, r[0])
+        if RubyVM::MJIT.enabled?
+          assert_equal(RUBY_DESCRIPTION, r[0])
+        else
+          assert_equal(EnvUtil.invoke_ruby(['--jit', '-e', 'print RUBY_DESCRIPTION'], '', true).first, r[0])
+        end
+        assert_equal([], e)
+      end
     end
   end
 
@@ -383,7 +408,7 @@ class TestRubyOptions < Test::Unit::TestCase
       t.puts "  end"
       t.puts "end"
       t.flush
-      warning = ' warning: found = in conditional, should be =='
+      warning = ' warning: found `= literal\' in conditional, should be =='
       err = ["#{t.path}:1:#{warning}",
              "#{t.path}:4:#{warning}",
             ]
@@ -420,10 +445,18 @@ class TestRubyOptions < Test::Unit::TestCase
           "begin", "if false", "for _ in []", "while false",
           "def foo", "class X", "module M",
           ["-> do", "end"], ["-> {", "}"],
+          ["if false;", "else ; end"],
+          ["if false;", "elsif false ; end"],
+          ["begin", "rescue ; end"],
+          ["begin rescue", "else ; end"],
+          ["begin", "ensure ; end"],
+          ["  case nil", "when true; end"],
+          ["case nil; when true", "end"],
         ].each do
           |b, e = 'end'|
           src = ["#{b}\n", " #{e}\n"]
-          k = b[/\A\S+/]
+          k = b[/\A\s*(\S+)/, 1]
+          e = e[/\A\s*(\S+)/, 1]
 
           a.for("no directives with #{b}") do
             err = ["#{t.path}:2: warning: mismatched indentations at '#{e}' with '#{k}' at 1"]
@@ -928,7 +961,7 @@ class TestRubyOptions < Test::Unit::TestCase
 
   def test_frozen_string_literal_debug
     with_debug_pat = /created at/
-    wo_debug_pat = /can\'t modify frozen String \(RuntimeError\)\n\z/
+    wo_debug_pat = /can\'t modify frozen String \(FrozenError\)\n\z/
     frozen = [
       ["--enable-frozen-string-literal", true],
       ["--disable-frozen-string-literal", false],
@@ -944,24 +977,33 @@ class TestRubyOptions < Test::Unit::TestCase
     frozen.product(debugs) do |(opt1, freeze), (opt2, debug)|
       opt = opts + [opt1, opt2].compact
       err = !freeze ? [] : debug ? with_debug_pat : wo_debug_pat
-      assert_in_out_err(opt, '"foo" << "bar"', [], err)
-      if freeze
-        assert_in_out_err(opt, '"foo#{123}bar" << "bar"', [], err)
+      [
+        ['"foo" << "bar"', err],
+        ['"foo#{123}bar" << "bar"', err],
+        ['+"foo#{123}bar" << "bar"', []],
+        ['-"foo#{123}bar" << "bar"', freeze && debug ? with_debug_pat : wo_debug_pat],
+      ].each do |code, expected|
+        assert_in_out_err(opt, code, [], expected, [opt, code])
       end
     end
   end
 
   def test___dir__encoding
+    lang = {"LC_ALL"=>ENV["LC_ALL"]||ENV["LANG"]}
     with_tmpchdir do
       testdir = "\u30c6\u30b9\u30c8"
       Dir.mkdir(testdir)
       Dir.chdir(testdir) do
         open("test.rb", "w") do |f|
           f.puts <<-END
-            p __FILE__.encoding == __dir__.encoding
+            if __FILE__.encoding == __dir__.encoding
+              p true
+            else
+              puts "__FILE__: \#{__FILE__.encoding}, __dir__: \#{__dir__.encoding}"
+            end
           END
         end
-        r, = EnvUtil.invoke_ruby("test.rb", "", true)
+        r, = EnvUtil.invoke_ruby([lang, "test.rb"], "", true)
         assert_equal "true", r.chomp, "the encoding of __FILE__ and __dir__ should be same"
       end
     end
@@ -977,5 +1019,10 @@ class TestRubyOptions < Test::Unit::TestCase
         assert_ruby_status([{"RUBYLIB"=>"."}, *%w[-E cp932:utf-8 a.rb]])
       end
     end
+  end
+
+  def test_null_script
+    skip "#{IO::NULL} is not a character device" unless File.chardev?(IO::NULL)
+    assert_in_out_err([IO::NULL], success: true)
   end
 end

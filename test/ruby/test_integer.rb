@@ -92,6 +92,17 @@ class TestInteger < Test::Unit::TestCase
     assert_equal(2 ** 50, Integer(2.0 ** 50))
     assert_raise(TypeError) { Integer(nil) }
 
+    bug14552 = '[ruby-core:85813]'
+    obj = Object.new
+    def obj.to_int; "str"; end
+    assert_raise(TypeError, bug14552) { Integer(obj) }
+    def obj.to_i; 42; end
+    assert_equal(42, Integer(obj), bug14552)
+
+    obj = Object.new
+    def obj.to_i; "str"; end
+    assert_raise(TypeError) { Integer(obj) }
+
     bug6192 = '[ruby-core:43566]'
     assert_raise(Encoding::CompatibilityError, bug6192) {Integer("0".encode("utf-16be"))}
     assert_raise(Encoding::CompatibilityError, bug6192) {Integer("0".encode("utf-16le"))}
@@ -114,6 +125,40 @@ class TestInteger < Test::Unit::TestCase
       assert_equal (1 << 100), Integer((1 << 100).to_f)
       assert_equal 1, Integer(1.0)
     end;
+  end
+
+  def test_Integer_with_exception_keyword
+    assert_nothing_raised(ArgumentError) {
+      assert_equal(nil, Integer("1z", exception: false))
+    }
+    assert_nothing_raised(ArgumentError) {
+      assert_equal(nil, Integer(Object.new, exception: false))
+    }
+    assert_nothing_raised(ArgumentError) {
+      o = Object.new
+      def o.to_i; 42.5; end
+      assert_equal(nil, Integer(o, exception: false))
+    }
+    assert_nothing_raised(ArgumentError) {
+      o = Object.new
+      def o.to_i; raise; end
+      assert_equal(nil, Integer(o, exception: false))
+    }
+    assert_nothing_raised(ArgumentError) {
+      o = Object.new
+      def o.to_int; raise; end
+      assert_equal(nil, Integer(o, exception: false))
+    }
+
+    assert_raise(ArgumentError) {
+      Integer("1z", exception: true)
+    }
+    assert_raise(TypeError) {
+      Integer(nil, exception: true)
+    }
+    assert_nothing_raised(TypeError) {
+      assert_equal(nil, Integer(nil, exception: false))
+    }
   end
 
   def test_int_p

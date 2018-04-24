@@ -9,9 +9,10 @@
 
 **********************************************************************/
 
-#include "internal.h"
+#include "ruby/encoding.h"
 #include "ruby/re.h"
 #include "ruby/util.h"
+#include "internal.h"
 #include "regint.h"
 #include "encindex.h"
 #include <ctype.h>
@@ -105,13 +106,7 @@ rb_memsearch_ss(const unsigned char *xs, long m, const unsigned char *ys, long n
 {
     const unsigned char *x = xs, *xe = xs + m;
     const unsigned char *y = ys, *ye = ys + n;
-#ifndef VALUE_MAX
-# if SIZEOF_VALUE == 8
-#  define VALUE_MAX 0xFFFFFFFFFFFFFFFFULL
-# elif SIZEOF_VALUE == 4
-#  define VALUE_MAX 0xFFFFFFFFUL
-# endif
-#endif
+#define VALUE_MAX ((VALUE)~(VALUE)0)
     VALUE hx, hy, mask = VALUE_MAX >> ((SIZEOF_VALUE - m) * CHAR_BIT);
 
     if (m > SIZEOF_VALUE)
@@ -356,7 +351,7 @@ rb_reg_check(VALUE re)
 
 static void
 rb_reg_expr_str(VALUE str, const char *s, long len,
-	rb_encoding *enc, rb_encoding *resenc)
+		rb_encoding *enc, rb_encoding *resenc, int term)
 {
     const char *p, *pend;
     int cr = ENC_CODERANGE_UNKNOWN;
@@ -377,7 +372,7 @@ rb_reg_expr_str(VALUE str, const char *s, long len,
 		    break;
 		}
 	    }
-	    else if (c != '/' && rb_enc_isprint(c, enc)) {
+	    else if (c != term && rb_enc_isprint(c, enc)) {
 		p += clen;
 	    }
 	    else {
@@ -404,11 +399,6 @@ rb_reg_expr_str(VALUE str, const char *s, long len,
 		p += n;
 		continue;
 	    }
-	    else if (c == '/') {
-		char c = '\\';
-		rb_str_buf_cat(str, &c, 1);
-		rb_str_buf_cat(str, p, clen);
-	    }
 	    else if (c == -1) {
 		clen = rb_enc_precise_mbclen(p, pend, enc);
 		if (!MBCLEN_CHARFOUND_P(clen)) {
@@ -424,6 +414,11 @@ rb_reg_expr_str(VALUE str, const char *s, long len,
 		    clen = MBCLEN_CHARFOUND_LEN(clen);
 		    rb_str_buf_cat(str, p, clen);
 		}
+	    }
+	    else if (c == term) {
+		char c = '\\';
+		rb_str_buf_cat(str, &c, 1);
+		rb_str_buf_cat(str, p, clen);
 	    }
 	    else if (rb_enc_isprint(c, enc)) {
 		rb_str_buf_cat(str, p, clen);
@@ -457,7 +452,7 @@ rb_reg_desc(const char *s, long len, VALUE re)
     else {
 	rb_enc_associate(str, rb_usascii_encoding());
     }
-    rb_reg_expr_str(str, s, len, enc, resenc);
+    rb_reg_expr_str(str, s, len, enc, resenc, '/');
     rb_str_buf_cat2(str, "/");
     if (re) {
 	char opts[4];
@@ -518,6 +513,7 @@ rb_reg_inspect(VALUE re)
     return rb_reg_desc(RREGEXP_SRC_PTR(re), RREGEXP_SRC_LEN(re), re);
 }
 
+static VALUE rb_reg_str_with_term(VALUE re, int term);
 
 /*
  *  call-seq:
@@ -541,6 +537,12 @@ rb_reg_inspect(VALUE re)
 
 static VALUE
 rb_reg_to_s(VALUE re)
+{
+    return rb_reg_str_with_term(re, '/');
+}
+
+static VALUE
+rb_reg_str_with_term(VALUE re, int term)
 {
     int options, opt;
     const int embeddable = ONIG_OPTION_MULTILINE|ONIG_OPTION_IGNORECASE|ONIG_OPTION_EXTEND;
@@ -620,7 +622,7 @@ rb_reg_to_s(VALUE re)
 
     rb_str_buf_cat2(str, ":");
     if (rb_enc_asciicompat(enc)) {
-	rb_reg_expr_str(str, (char*)ptr, len, enc, NULL);
+	rb_reg_expr_str(str, (char*)ptr, len, enc, NULL, term);
 	rb_str_buf_cat2(str, ")");
     }
     else {
@@ -640,7 +642,7 @@ rb_reg_to_s(VALUE re)
 	memcpy(paren, s, n);
 	rb_str_resize(str, RSTRING_LEN(str) - n);
 
-	rb_reg_expr_str(str, (char*)ptr, len, enc, NULL);
+	rb_reg_expr_str(str, (char*)ptr, len, enc, NULL, term);
 	rb_str_buf_cat(str, paren, n);
     }
     rb_enc_copy(str, re);
@@ -648,6 +650,8 @@ rb_reg_to_s(VALUE re)
     OBJ_INFECT(str, re);
     return str;
 }
+
+NORETURN(static void rb_reg_raise(const char *s, long len, const char *err, VALUE re));
 
 static void
 rb_reg_raise(const char *s, long len, const char *err, VALUE re)
@@ -667,12 +671,14 @@ rb_enc_reg_error_desc(const char *s, long len, rb_encoding *enc, int options, co
 
     rb_enc_associate(desc, enc);
     rb_str_buf_cat2(desc, ": /");
-    rb_reg_expr_str(desc, s, len, enc, resenc);
+    rb_reg_expr_str(desc, s, len, enc, resenc, '/');
     opts[0] = '/';
     option_to_str(opts + 1, options);
     rb_str_buf_cat2(desc, opts);
     return rb_exc_new3(rb_eRegexpError, desc);
 }
+
+NORETURN(static void rb_enc_reg_raise(const char *s, long len, rb_encoding *enc, int options, const char *err));
 
 static void
 rb_enc_reg_raise(const char *s, long len, rb_encoding *enc, int options, const char *err)
@@ -686,6 +692,8 @@ rb_reg_error_desc(VALUE str, int options, const char *err)
     return rb_enc_reg_error_desc(RSTRING_PTR(str), RSTRING_LEN(str),
 				 rb_enc_get(str), options, err);
 }
+
+NORETURN(static void rb_reg_raise_str(VALUE str, int options, const char *err));
 
 static void
 rb_reg_raise_str(VALUE str, int options, const char *err)
@@ -1325,14 +1333,14 @@ rb_backref_set_string(VALUE string, long pos, long len)
  *      r.fixed_encoding?                               #=> true
  *      r.encoding                                      #=> #<Encoding:UTF-8>
  *      r =~ "\u{6666} a"                               #=> 2
- *      r =~ "\xa1\xa2".force_encoding("euc-jp")        #=> ArgumentError
+ *      r =~ "\xa1\xa2".force_encoding("euc-jp")        #=> Encoding::CompatibilityError
  *      r =~ "abc".force_encoding("euc-jp")             #=> 0
  *
  *      r = /\u{6666}/
  *      r.fixed_encoding?                               #=> true
  *      r.encoding                                      #=> #<Encoding:UTF-8>
  *      r =~ "\u{6666} a"                               #=> 0
- *      r =~ "\xa1\xa2".force_encoding("euc-jp")        #=> ArgumentError
+ *      r =~ "\xa1\xa2".force_encoding("euc-jp")        #=> Encoding::CompatibilityError
  *      r =~ "abc".force_encoding("euc-jp")             #=> nil
  */
 
@@ -1349,6 +1357,7 @@ static VALUE
 rb_reg_preprocess(const char *p, const char *end, rb_encoding *enc,
         rb_encoding **fixed_enc, onig_errmsg_buffer err);
 
+NORETURN(static void reg_enc_error(VALUE re, VALUE str));
 
 static void
 reg_enc_error(VALUE re, VALUE str)
@@ -2535,11 +2544,13 @@ unescape_nonascii(const char *p, const char *end, rb_encoding *enc,
     while (p < end) {
         int chlen = rb_enc_precise_mbclen(p, end, enc);
         if (!MBCLEN_CHARFOUND_P(chlen)) {
+          invalid_multibyte:
             errcpy(err, "invalid multibyte character");
             return -1;
         }
         chlen = MBCLEN_CHARFOUND_LEN(chlen);
         if (1 < chlen || (*p & 0x80)) {
+          multibyte:
             rb_str_buf_cat(buf, p, chlen);
             p += chlen;
             if (*encp == 0)
@@ -2556,6 +2567,16 @@ unescape_nonascii(const char *p, const char *end, rb_encoding *enc,
             if (p == end) {
                 errcpy(err, "too short escape sequence");
                 return -1;
+            }
+            chlen = rb_enc_precise_mbclen(p, end, enc);
+            if (!MBCLEN_CHARFOUND_P(chlen)) {
+                goto invalid_multibyte;
+            }
+            if ((chlen = MBCLEN_CHARFOUND_LEN(chlen)) > 1) {
+		/* include the previous backslash */
+                --p;
+                ++chlen;
+                goto multibyte;
             }
             switch (c = *p++) {
               case '1': case '2': case '3':
@@ -2889,7 +2910,7 @@ rb_reg_init_str_enc(VALUE re, VALUE s, rb_encoding *enc, int options)
     return re;
 }
 
-VALUE
+MJIT_FUNC_EXPORTED VALUE
 rb_reg_new_ary(VALUE ary, int opt)
 {
     return rb_reg_new_str(rb_reg_preprocess_dregexp(ary, opt), opt);
@@ -3637,7 +3658,7 @@ rb_reg_s_union(VALUE self, VALUE args0)
                 else {
                     has_asciionly = 1;
                 }
-		v = rb_reg_to_s(v);
+		v = rb_reg_str_with_term(v, -1);
 	    }
 	    else {
                 rb_encoding *enc;

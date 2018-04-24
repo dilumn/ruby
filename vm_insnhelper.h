@@ -66,11 +66,11 @@ enum vm_regan_regtype {
     VM_REGAN_EP = 2,
     VM_REGAN_CFP = 3,
     VM_REGAN_SELF = 4,
-    VM_REGAN_ISEQ = 5,
+    VM_REGAN_ISEQ = 5
 };
 enum vm_regan_acttype {
     VM_REGAN_ACT_GET = 0,
-    VM_REGAN_ACT_SET = 1,
+    VM_REGAN_ACT_SET = 1
 };
 
 #if VM_COLLECT_USAGE_DETAILS
@@ -101,6 +101,7 @@ enum vm_regan_acttype {
 #define DEC_SP(x)  (VM_REG_SP -= (COLLECT_USAGE_REGISTER_HELPER(SP, SET, (x))))
 #define SET_SV(x)  (*GET_SP() = (x))
   /* set current stack value as x */
+#define ADJ_SP(x)  INC_SP(x)
 
 /* instruction sequence C struct */
 #define GET_ISEQ() (GET_CFP()->iseq)
@@ -126,11 +127,36 @@ enum vm_regan_acttype {
 /* deal with control flow 2: method/iterator              */
 /**********************************************************/
 
+#ifdef MJIT_HEADER
+/* When calling ISeq which may catch an exception from JIT-ed code, we should not call
+   mjit_exec directly to prevent the caller frame from being canceled. That's because
+   the caller frame may have stack values in the local variables and the cancelling
+   the caller frame will purge them. But directly calling mjit_exec is faster... */
+#define EXEC_EC_CFP(val) do { \
+    if (ec->cfp->iseq->body->catch_except_p) { \
+        VM_ENV_FLAGS_SET(ec->cfp->ep, VM_FRAME_FLAG_FINISH); \
+        val = vm_exec(ec, TRUE); \
+    } \
+    else if ((val = mjit_exec(ec)) == Qundef) { \
+        VM_ENV_FLAGS_SET(ec->cfp->ep, VM_FRAME_FLAG_FINISH); \
+        val = vm_exec(ec, FALSE); \
+    } \
+} while (0)
+#else
+/* When calling from VM, longjmp in the callee won't purge any JIT-ed caller frames.
+   So it's safe to directly call mjit_exec. */
+#define EXEC_EC_CFP(val) do { \
+    if ((val = mjit_exec(ec)) == Qundef) { \
+        RESTORE_REGS(); \
+        NEXT_INSN(); \
+    } \
+} while (0)
+#endif
+
 #define CALL_METHOD(calling, ci, cc) do { \
     VALUE v = (*(cc)->call)(ec, GET_CFP(), (calling), (ci), (cc)); \
     if (v == Qundef) { \
-	RESTORE_REGS(); \
-	NEXT_INSN(); \
+        EXEC_EC_CFP(val); \
     } \
     else { \
 	val = v; \
@@ -178,22 +204,18 @@ enum vm_regan_acttype {
 #define USE_IC_FOR_SPECIALIZED_METHOD 1
 #endif
 
-#define CALL_SIMPLE_METHOD(recv_) do { \
-    struct rb_calling_info calling; \
-    calling.block_handler = VM_BLOCK_HANDLER_NONE; \
-    calling.argc = ci->orig_argc; \
-    vm_search_method(ci, cc, calling.recv = (recv_)); \
-    CALL_METHOD(&calling, ci, cc); \
-} while (0)
-
 #define NEXT_CLASS_SERIAL() (++ruby_vm_class_serial)
 #define GET_GLOBAL_METHOD_STATE() (ruby_vm_global_method_state)
 #define INC_GLOBAL_METHOD_STATE() (++ruby_vm_global_method_state)
 #define GET_GLOBAL_CONSTANT_STATE() (ruby_vm_global_constant_state)
 #define INC_GLOBAL_CONSTANT_STATE() (++ruby_vm_global_constant_state)
 
-static VALUE make_no_method_exception(VALUE exc, VALUE format, VALUE obj,
-				      int argc, const VALUE *argv, int priv);
+extern rb_method_definition_t *rb_method_definition_create(rb_method_type_t type, ID mid);
+extern void rb_method_definition_set(const rb_method_entry_t *me, rb_method_definition_t *def, void *opts);
+extern int rb_method_definition_eq(const rb_method_definition_t *d1, const rb_method_definition_t *d2);
+
+extern VALUE rb_make_no_method_exception(VALUE exc, VALUE format, VALUE obj,
+					 int argc, const VALUE *argv, int priv);
 
 static inline struct vm_throw_data *
 THROW_DATA_NEW(VALUE val, const rb_control_frame_t *cf, VALUE st)
@@ -251,5 +273,13 @@ THROW_DATA_CONSUMED_SET(struct vm_throw_data *obj)
 	obj->flags |= THROW_DATA_CONSUMED;
     }
 }
+
+#define IS_ARGS_SPLAT(ci)   ((ci)->flag & VM_CALL_ARGS_SPLAT)
+#define IS_ARGS_KEYWORD(ci) ((ci)->flag & VM_CALL_KWARG)
+
+#define CALLER_SETUP_ARG(cfp, calling, ci) do { \
+    if (UNLIKELY(IS_ARGS_SPLAT(ci))) vm_caller_setup_arg_splat((cfp), (calling)); \
+    if (UNLIKELY(IS_ARGS_KEYWORD(ci))) vm_caller_setup_arg_kw((cfp), (calling), (ci)); \
+} while (0)
 
 #endif /* RUBY_INSNHELPER_H */

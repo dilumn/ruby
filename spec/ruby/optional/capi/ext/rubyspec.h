@@ -409,8 +409,10 @@
 #define HAVE_NUM2CHR                       1
 #define HAVE_RB_CMPINT                     1
 #define HAVE_RB_INT2INUM                   1
+#define HAVE_RB_UINT2INUM                  1
 #define HAVE_RB_INTEGER                    1
 #define HAVE_RB_LL2INUM                    1
+#define HAVE_RB_ULL2INUM                   1
 #define HAVE_RB_NUM2DBL                    1
 #if SIZEOF_INT < SIZEOF_LONG
 #define HAVE_RB_NUM2INT                    1

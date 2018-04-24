@@ -1,5 +1,5 @@
 require 'rexml/document'
-require File.expand_path('../../../../spec_helper', __FILE__)
+require_relative '../../../spec_helper'
 
 describe "REXML::Element#namespaces" do
   before :each do
@@ -7,6 +7,7 @@ describe "REXML::Element#namespaces" do
     @elem = doc.elements["//c"]
   end
 
+=begin
   it "returns a hash of the namespaces" do
     ns = {"y"=>"2", "z"=>"3", "xmlns"=>"1"}
     @elem.namespaces.keys.sort.should == ns.keys.sort
@@ -28,5 +29,5 @@ describe "REXML::Element#namespaces" do
     values = ["2", "3", "1"]
     @elem.namespaces.values.sort.should == values.sort
   end
-
+=end
 end

@@ -70,10 +70,12 @@ class TestFiber < Test::Unit::TestCase
     assert_raise(ArgumentError){
       Fiber.new # Fiber without block
     }
-    assert_raise(FiberError){
-      f = Fiber.new{}
-      Thread.new{f.resume}.join # Fiber yielding across thread
-    }
+    f = Fiber.new{}
+    Thread.new{
+      assert_raise(FiberError){ # Fiber yielding across thread
+        f.resume
+      }
+    }.join
     assert_raise(FiberError){
       f = Fiber.new{}
       f.resume
@@ -199,11 +201,11 @@ class TestFiber < Test::Unit::TestCase
   end
 
   def test_resume_root_fiber
-    assert_raise(FiberError) do
-      Thread.new do
+    Thread.new do
+      assert_raise(FiberError) do
         Fiber.current.resume
-      end.join
-    end
+      end
+    end.join
   end
 
   def test_gc_root_fiber
@@ -376,5 +378,13 @@ class TestFiber < Test::Unit::TestCase
     assert_match(/terminated/, f.to_s)
     assert_match(/resumed/, Fiber.current.to_s)
   end
-end
 
+  def test_create_fiber_in_new_thread
+    ret = Thread.new{
+      Thread.new{
+        Fiber.new{Fiber.yield :ok}.resume
+      }.value
+    }.value
+    assert_equal :ok, ret, '[Bug #14642]'
+  end
+end

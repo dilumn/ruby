@@ -11,9 +11,10 @@
 
 **********************************************************************/
 
-#include "internal.h"
+#include "ruby/encoding.h"
 #include "ruby/st.h"
 #include "ruby/util.h"
+#include "internal.h"
 #include <errno.h>
 #include "probes.h"
 #include "id.h"
@@ -193,8 +194,16 @@ any_hash(VALUE a, st_index_t (*other_func)(VALUE))
 	hnum = other_func(a);
     }
   out:
+#if SIZEOF_LONG < SIZEOF_ST_INDEX_T
+    if (hnum > 0)
+	hnum &= (unsigned long)-1 >> 2;
+    else
+	hnum |= ~((unsigned long)-1 >> 2);
+#else
     hnum <<= 1;
-    return (long)RSHIFT(hnum, 1);
+    hnum = RSHIFT(hnum, 1);
+#endif
+    return (long)hnum;
 }
 
 static st_index_t
@@ -216,14 +225,14 @@ rb_any_hash(VALUE a)
 
 /* Here we two primes with random bit generation.  */
 static const uint64_t prime1 = ((uint64_t)0x2e0bb864 << 32) | 0xe9ea7df5;
-static const uint64_t prime2 = ((uint64_t)0xcdb32970 << 32) | 0x830fcaa1;
+static const uint32_t prime2 = 0x830fcab9;
 
 
 static inline uint64_t
 mult_and_mix(uint64_t m1, uint64_t m2)
 {
-#if defined(__GNUC__) && UINT_MAX != ULONG_MAX
-    __uint128_t r = (__uint128_t) m1 * (__uint128_t) m2;
+#if defined HAVE_UINT128_T
+    uint128_t r = (uint128_t) m1 * (uint128_t) m2;
     return (uint64_t) (r >> 64) ^ (uint64_t) r;
 #else
     uint64_t hm1 = m1 >> 32, hm2 = m2 >> 32;
@@ -245,7 +254,7 @@ key64_hash(uint64_t key, uint32_t seed)
 long
 rb_objid_hash(st_index_t index)
 {
-    return (long)key64_hash(rb_hash_start(index), (uint32_t)prime2);
+    return (long)key64_hash(rb_hash_start(index), prime2);
 }
 
 static st_index_t
@@ -282,7 +291,7 @@ rb_ident_hash(st_data_t n)
     }
 #endif
 
-    return (st_index_t)key64_hash(rb_hash_start((st_index_t)n), (uint32_t)prime2);
+    return (st_index_t)key64_hash(rb_hash_start((st_index_t)n), prime2);
 }
 
 static const struct st_hash_type identhash = {
@@ -427,6 +436,14 @@ rb_hash_new(void)
 }
 
 VALUE
+rb_hash_new_compare_by_id(void)
+{
+    VALUE hash = rb_hash_new();
+    RHASH(hash)->ntbl = rb_init_identtable();
+    return hash;
+}
+
+MJIT_FUNC_EXPORTED VALUE
 rb_hash_new_with_size(st_index_t size)
 {
     VALUE ret = rb_hash_new();
@@ -478,7 +495,7 @@ rb_hash_tbl(VALUE hash)
     return hash_tbl(hash);
 }
 
-struct st_table *
+MJIT_FUNC_EXPORTED struct st_table *
 rb_hash_tbl_raw(VALUE hash)
 {
     return hash_tbl(hash);
@@ -1566,19 +1583,25 @@ fstring_existing_str(VALUE str)
     }
 }
 
+VALUE
+rb_hash_key_str(VALUE key)
+{
+    VALUE k;
+
+    if (!RB_OBJ_TAINTED(key) &&
+	(k = fstring_existing_str(key)) != Qnil) {
+	return k;
+    }
+    else {
+	return rb_str_new_frozen(key);
+    }
+}
+
 static int
 hash_aset_str(st_data_t *key, st_data_t *val, struct update_arg *arg, int existing)
 {
     if (!existing && !RB_OBJ_FROZEN(*key)) {
-	VALUE k;
-
-	if (!RB_OBJ_TAINTED(*key) &&
-	    (k = fstring_existing_str(*key)) != Qnil) {
-	    *key = k;
-	}
-	else {
-	    *key = rb_str_new_frozen(*key);
-	}
+	*key = rb_hash_key_str(*key);
     }
     return hash_aset(key, val, arg, existing);
 }
@@ -1894,6 +1917,8 @@ rb_hash_transform_keys(VALUE hash)
     return result;
 }
 
+static VALUE rb_hash_flatten(int argc, VALUE *argv, VALUE hash);
+
 /*
  *  call-seq:
  *     hsh.transform_keys! {|key| block } -> hsh
@@ -1917,12 +1942,14 @@ rb_hash_transform_keys_bang(VALUE hash)
     RETURN_SIZED_ENUMERATOR(hash, 0, 0, hash_enum_size);
     rb_hash_modify_check(hash);
     if (RHASH(hash)->ntbl) {
-	long i;
-	VALUE keys = rb_hash_keys(hash);
-	for (i = 0; i < RARRAY_LEN(keys); ++i) {
-	    VALUE key = RARRAY_AREF(keys, i), new_key = rb_yield(key);
-	    rb_hash_aset(hash, new_key, rb_hash_delete(hash, key));
-	}
+        long i;
+        VALUE pairs = rb_hash_flatten(0, NULL, hash);
+        rb_hash_clear(hash);
+        for (i = 0; i < RARRAY_LEN(pairs); i += 2) {
+            VALUE key = RARRAY_AREF(pairs, i), new_key = rb_yield(key),
+                  val = RARRAY_AREF(pairs, i+1);
+            rb_hash_aset(hash, new_key, val);
+        }
     }
     return hash;
 }
@@ -2128,7 +2155,7 @@ keys_i(VALUE key, VALUE value, VALUE ary)
  *
  */
 
-VALUE
+MJIT_FUNC_EXPORTED VALUE
 rb_hash_keys(VALUE hash)
 {
     VALUE keys;
@@ -2216,7 +2243,7 @@ rb_hash_values(VALUE hash)
  *  See also Enumerable#include?
  */
 
-VALUE
+MJIT_FUNC_EXPORTED VALUE
 rb_hash_has_key(VALUE hash, VALUE key)
 {
     if (!RHASH(hash)->ntbl)
@@ -2922,7 +2949,7 @@ rb_hash_compare_by_id(VALUE hash)
  *
  */
 
-VALUE
+MJIT_FUNC_EXPORTED VALUE
 rb_hash_compare_by_id_p(VALUE hash)
 {
     if (!RHASH(hash)->ntbl)
@@ -2975,6 +3002,17 @@ any_p_i_fast(VALUE key, VALUE value, VALUE arg)
     return ST_CONTINUE;
 }
 
+static int
+any_p_i_pattern(VALUE key, VALUE value, VALUE arg)
+{
+    VALUE ret = rb_funcall(((VALUE *)arg)[1], idEqq, 1, rb_assoc_new(key, value));
+    if (RTEST(ret)) {
+	*(VALUE *)arg = Qtrue;
+	return ST_STOP;
+    }
+    return ST_CONTINUE;
+}
+
 /*
  *  call-seq:
  *     hsh.any? [{ |(key, value)| block }]   -> true or false
@@ -2983,20 +3021,29 @@ any_p_i_fast(VALUE key, VALUE value, VALUE arg)
  */
 
 static VALUE
-rb_hash_any_p(VALUE hash)
+rb_hash_any_p(int argc, VALUE *argv, VALUE hash)
 {
-    VALUE ret = Qfalse;
+    VALUE args[2];
+    args[0] = Qfalse;
 
+    rb_check_arity(argc, 0, 1);
     if (RHASH_EMPTY_P(hash)) return Qfalse;
-    if (!rb_block_given_p()) {
-	/* yields pairs, never false */
-	return Qtrue;
+    if (argc) {
+	args[1] = argv[0];
+
+	rb_hash_foreach(hash, any_p_i_pattern, (VALUE)args);
     }
-    if (rb_block_arity() > 1)
-	rb_hash_foreach(hash, any_p_i_fast, (VALUE)&ret);
-    else
-	rb_hash_foreach(hash, any_p_i, (VALUE)&ret);
-    return ret;
+    else {
+	if (!rb_block_given_p()) {
+	    /* yields pairs, never false */
+	    return Qtrue;
+	}
+	if (rb_block_arity() > 1)
+	    rb_hash_foreach(hash, any_p_i_fast, (VALUE)args);
+	else
+	    rb_hash_foreach(hash, any_p_i, (VALUE)args);
+    }
+    return args[0];
 }
 
 /*
@@ -3139,6 +3186,19 @@ hash_proc_call(VALUE key, VALUE hash, int argc, const VALUE *argv, VALUE passed_
     return rb_hash_aref(hash, *argv);
 }
 
+/*
+ * call-seq:
+ *   hash.to_proc -> proc
+ *
+ * Returns a Proc which maps keys to values.
+ *
+ *   h = {a:1, b:2}
+ *   hp = h.to_proc
+ *   hp.call(:a)          #=> 1
+ *   hp.call(:b)          #=> 2
+ *   hp.call(:c)          #=> nil
+ *   [:a, :b, :c].map(&h) #=> [1, 2, nil]
+ */
 static VALUE
 rb_hash_to_proc(VALUE hash)
 {
@@ -4008,6 +4068,35 @@ env_keep_if(VALUE ehash)
 }
 
 /*
+ *  call-seq:
+ *     ENV.slice(*keys) -> a_hash
+ *
+ *  Returns a hash containing only the given keys from ENV and their values.
+ *
+ *     ENV.slice("TERM","HOME")  #=> {"TERM"=>"xterm-256color", "HOME"=>"/Users/rhc"}
+ */
+static VALUE
+env_slice(int argc, VALUE *argv)
+{
+    int i;
+    VALUE key, value, result;
+
+    if (argc == 0) {
+        return rb_hash_new();
+    }
+    result = rb_hash_new_with_size(argc);
+
+    for (i = 0; i < argc; i++) {
+        key = argv[i];
+        value = rb_f_getenv(Qnil, key);
+        if (value != Qnil)
+            rb_hash_aset(result, key, value);
+    }
+
+    return result;
+}
+
+/*
  * call-seq:
  *   ENV.clear
  *
@@ -4630,6 +4719,8 @@ Init_Hash(void)
     rb_define_method(rb_cHash, "keep_if", rb_hash_keep_if, 0);
     rb_define_method(rb_cHash, "select", rb_hash_select, 0);
     rb_define_method(rb_cHash, "select!", rb_hash_select_bang, 0);
+    rb_define_method(rb_cHash, "filter", rb_hash_select, 0);
+    rb_define_method(rb_cHash, "filter!", rb_hash_select_bang, 0);
     rb_define_method(rb_cHash, "reject", rb_hash_reject, 0);
     rb_define_method(rb_cHash, "reject!", rb_hash_reject_bang, 0);
     rb_define_method(rb_cHash, "slice", rb_hash_slice, -1);
@@ -4655,7 +4746,7 @@ Init_Hash(void)
     rb_define_method(rb_cHash, "compare_by_identity", rb_hash_compare_by_id, 0);
     rb_define_method(rb_cHash, "compare_by_identity?", rb_hash_compare_by_id_p, 0);
 
-    rb_define_method(rb_cHash, "any?", rb_hash_any_p, 0);
+    rb_define_method(rb_cHash, "any?", rb_hash_any_p, -1);
     rb_define_method(rb_cHash, "dig", rb_hash_dig, -1);
 
     rb_define_method(rb_cHash, "<=", rb_hash_le, 1);
@@ -4687,11 +4778,14 @@ Init_Hash(void)
     rb_define_singleton_method(envtbl, "delete", env_delete_m, 1);
     rb_define_singleton_method(envtbl, "delete_if", env_delete_if, 0);
     rb_define_singleton_method(envtbl, "keep_if", env_keep_if, 0);
+    rb_define_singleton_method(envtbl, "slice", env_slice, -1);
     rb_define_singleton_method(envtbl, "clear", rb_env_clear, 0);
     rb_define_singleton_method(envtbl, "reject", env_reject, 0);
     rb_define_singleton_method(envtbl, "reject!", env_reject_bang, 0);
     rb_define_singleton_method(envtbl, "select", env_select, 0);
     rb_define_singleton_method(envtbl, "select!", env_select_bang, 0);
+    rb_define_singleton_method(envtbl, "filter", env_select, 0);
+    rb_define_singleton_method(envtbl, "filter!", env_select_bang, 0);
     rb_define_singleton_method(envtbl, "shift", env_shift, 0);
     rb_define_singleton_method(envtbl, "invert", env_invert, 0);
     rb_define_singleton_method(envtbl, "replace", env_replace, 1);

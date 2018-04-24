@@ -1,5 +1,5 @@
-require File.expand_path('../../../spec_helper', __FILE__)
-require File.expand_path('../fixtures/common', __FILE__)
+require_relative '../../spec_helper'
+require_relative 'fixtures/common'
 
 newline = "\n"
 platform_is :windows do
@@ -26,7 +26,7 @@ describe :process_spawn_does_not_close_std_streams, shared: true do
       code = "STDERR.puts 'hello'"
       cmd = "Process.wait Process.spawn(#{ruby_cmd(code).inspect}, #{@options.inspect})"
       ruby_exe(cmd, args: "2> #{@output}")
-      File.binread(@output).should == "hello#{newline}"
+      File.binread(@output).should =~ /hello#{newline}/
     end
   end
 end
@@ -595,8 +595,10 @@ describe "Process.spawn" do
     end
   end
 
-  it "raises an Errno::EACCES when passed a directory" do
-    lambda { Process.spawn File.dirname(__FILE__) }.should raise_error(Errno::EACCES)
+  it "raises an Errno::EACCES or Errno::EISDIR when passed a directory" do
+    lambda { Process.spawn File.dirname(__FILE__) }.should raise_error(SystemCallError) { |e|
+      [Errno::EACCES, Errno::EISDIR].should include(e.class)
+    }
   end
 
   it "raises an ArgumentError when passed a string key in options" do

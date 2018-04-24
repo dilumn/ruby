@@ -62,12 +62,12 @@ class TestString < Test::Unit::TestCase
   def test_initialize
     str = S("").freeze
     assert_equal("", str.__send__(:initialize))
-    assert_raise(RuntimeError){ str.__send__(:initialize, 'abc') }
-    assert_raise(RuntimeError){ str.__send__(:initialize, capacity: 1000) }
-    assert_raise(RuntimeError){ str.__send__(:initialize, 'abc', capacity: 1000) }
-    assert_raise(RuntimeError){ str.__send__(:initialize, encoding: 'euc-jp') }
-    assert_raise(RuntimeError){ str.__send__(:initialize, 'abc', encoding: 'euc-jp') }
-    assert_raise(RuntimeError){ str.__send__(:initialize, 'abc', capacity: 1000, encoding: 'euc-jp') }
+    assert_raise(FrozenError){ str.__send__(:initialize, 'abc') }
+    assert_raise(FrozenError){ str.__send__(:initialize, capacity: 1000) }
+    assert_raise(FrozenError){ str.__send__(:initialize, 'abc', capacity: 1000) }
+    assert_raise(FrozenError){ str.__send__(:initialize, encoding: 'euc-jp') }
+    assert_raise(FrozenError){ str.__send__(:initialize, 'abc', encoding: 'euc-jp') }
+    assert_raise(FrozenError){ str.__send__(:initialize, 'abc', capacity: 1000, encoding: 'euc-jp') }
   end
 
   def test_initialize_nonstring
@@ -491,7 +491,7 @@ CODE
     assert_equal(S("a").hash, S("a\u0101").chomp!(S("\u0101")).hash, '[ruby-core:22414]')
 
     s = S("").freeze
-    assert_raise_with_message(RuntimeError, /frozen/) {s.chomp!}
+    assert_raise_with_message(FrozenError, /frozen/) {s.chomp!}
 
     s = S("ax")
     o = Struct.new(:s).new(s)
@@ -499,7 +499,7 @@ CODE
       s.freeze
       "x"
     end
-    assert_raise_with_message(RuntimeError, /frozen/) {s.chomp!(o)}
+    assert_raise_with_message(FrozenError, /frozen/) {s.chomp!(o)}
 
     s = S("hello")
     assert_equal("hel", s.chomp!('lo'))
@@ -617,7 +617,7 @@ CODE
     expected = S("\u0300".encode(Encoding::UTF_16LE))
     assert_equal(expected, result, bug7090)
     assert_raise(TypeError) { 'foo' << :foo }
-    assert_raise(RuntimeError) { 'foo'.freeze.concat('bar') }
+    assert_raise(FrozenError) { 'foo'.freeze.concat('bar') }
   end
 
   def test_concat_literals
@@ -659,7 +659,9 @@ CODE
       assert_raise(ArgumentError) {S("mypassword".encode(enc)).crypt(S("aa"))}
     end
 
-    @cls == String and assert_no_memory_leak([], 's = ""', <<~'end;') # do
+    @cls == String and
+      assert_no_memory_leak([], 's = ""', "#{<<~"begin;"}\n#{<<~'end;'}")
+    begin;
       1000.times { s.crypt(-"..").clear  }
     end;
   end
@@ -751,6 +753,70 @@ CODE
     assert_equal(S('"\\u{ABCDE}"'), b.dump)
     b= S("\u{10ABCD}")
     assert_equal(S('"\\u{10ABCD}"'), b.dump)
+  end
+
+  def test_undump
+    a = S("Test") << 1 << 2 << 3 << 9 << 13 << 10
+    assert_equal(a, S('"Test\\x01\\x02\\x03\\t\\r\\n"').undump)
+    assert_equal(S("\\ca"), S('"\\ca"').undump)
+    assert_equal(S("\u{7F}"), S('"\\x7F"').undump)
+    assert_equal(S("\u{7F}A"), S('"\\x7FA"').undump)
+    assert_equal(S("\u{AB}"), S('"\\u00AB"').undump)
+    assert_equal(S("\u{ABC}"), S('"\\u0ABC"').undump)
+    assert_equal(S("\uABCD"), S('"\\uABCD"').undump)
+    assert_equal(S("\uABCD"), S('"\\uABCD"').undump)
+    assert_equal(S("\u{ABCDE}"), S('"\\u{ABCDE}"').undump)
+    assert_equal(S("\u{10ABCD}"), S('"\\u{10ABCD}"').undump)
+    assert_equal(S("\u{ABCDE 10ABCD}"), S('"\\u{ABCDE 10ABCD}"').undump)
+    assert_equal(S(""), S('"\\u{}"').undump)
+    assert_equal(S(""), S('"\\u{  }"').undump)
+
+    assert_equal(S("\u3042".encode("sjis")), S('"\x82\xA0"'.force_encoding("sjis")).undump)
+    assert_equal(S("\u8868".encode("sjis")), S("\"\\x95\\\\\"".force_encoding("sjis")).undump)
+
+    assert_equal(S("äöü"), S('"\u00E4\u00F6\u00FC"').undump)
+    assert_equal(S("äöü"), S('"\xC3\xA4\xC3\xB6\xC3\xBC"').undump)
+
+    assert_equal(Encoding::UTF_8, S('"\\u3042"').encode(Encoding::EUC_JP).undump.encoding)
+
+    assert_equal("abc".encode(Encoding::UTF_16LE),
+                 '"a\x00b\x00c\x00".force_encoding("UTF-16LE")'.undump)
+
+    assert_equal('\#', '"\\\\#"'.undump)
+    assert_equal('\#{', '"\\\\\#{"'.undump)
+
+    assert_raise(RuntimeError) { S('\u3042').undump }
+    assert_raise(RuntimeError) { S('"\x82\xA0\u3042"'.force_encoding("SJIS")).undump }
+    assert_raise(RuntimeError) { S('"\u3042\x82\xA0"'.force_encoding("SJIS")).undump }
+    assert_raise(RuntimeError) { S('"".force_encoding()').undump }
+    assert_raise(RuntimeError) { S('"".force_encoding("').undump }
+    assert_raise(RuntimeError) { S('"".force_encoding("UNKNOWN")').undump }
+    assert_raise(RuntimeError) { S('"\u3042".force_encoding("UTF-16LE")').undump }
+    assert_raise(RuntimeError) { S('"\x00\x00".force_encoding("UTF-16LE")"').undump }
+    assert_raise(RuntimeError) { S('"\x00\x00".force_encoding("'+("a"*9999999)+'")"').undump }
+    assert_raise(RuntimeError) { S(%("\u00E4")).undump }
+    assert_raise(RuntimeError) { S('"').undump }
+    assert_raise(RuntimeError) { S('"""').undump }
+    assert_raise(RuntimeError) { S('""""').undump }
+
+    assert_raise(RuntimeError) { S('"a').undump }
+    assert_raise(RuntimeError) { S('"\u"').undump }
+    assert_raise(RuntimeError) { S('"\u{"').undump }
+    assert_raise(RuntimeError) { S('"\u304"').undump }
+    assert_raise(RuntimeError) { S('"\u304Z"').undump }
+    assert_raise(RuntimeError) { S('"\udfff"').undump }
+    assert_raise(RuntimeError) { S('"\u{dfff}"').undump }
+    assert_raise(RuntimeError) { S('"\u{3042"').undump }
+    assert_raise(RuntimeError) { S('"\u{3042 "').undump }
+    assert_raise(RuntimeError) { S('"\u{110000}"').undump }
+    assert_raise(RuntimeError) { S('"\u{1234567}"').undump }
+    assert_raise(RuntimeError) { S('"\x"').undump }
+    assert_raise(RuntimeError) { S('"\xA"').undump }
+    assert_raise(RuntimeError) { S('"\\"').undump }
+    assert_raise(RuntimeError) { S(%("\0")).undump }
+    assert_raise_with_message(RuntimeError, /invalid/) {
+      '"\\u{007F}".xxxxxx'.undump
+    }
   end
 
   def test_dup
@@ -919,11 +985,18 @@ CODE
       "\u{1f469 200d 2764 fe0f 200d 1f469}",
     ].each do |g|
       assert_equal [g], g.each_grapheme_cluster.to_a
+      assert_equal 1, g.each_grapheme_cluster.size
     end
 
-    assert_equal ["\u000A", "\u0308"], "\u{a 308}".each_grapheme_cluster.to_a
-    assert_equal ["\u000D", "\u0308"], "\u{d 308}".each_grapheme_cluster.to_a
-    assert_equal ["a", "b", "c"], "abc".b.each_grapheme_cluster.to_a
+    [
+      ["\u{a 308}", ["\u000A", "\u0308"]],
+      ["\u{d 308}", ["\u000D", "\u0308"]],
+      ["abc", ["a", "b", "c"]],
+    ].each do |str, grapheme_clusters|
+      assert_equal grapheme_clusters, str.each_grapheme_cluster.to_a
+      assert_equal grapheme_clusters.size, str.each_grapheme_cluster.size
+    end
+
     s = ("x"+"\u{10ABCD}"*250000)
     assert_empty(s.each_grapheme_cluster {s.clear})
   end
@@ -1058,6 +1131,10 @@ CODE
     res = []
     S("\r\n").each_line(chomp: true) {|x| res << x}
     assert_equal([S("")], res)
+
+    res = []
+    S("a\n b\n").each_line(" ", chomp: true) {|x| res << x}
+    assert_equal([S("a\n"), S("b\n")], res)
   end
 
   def test_lines
@@ -1367,10 +1444,10 @@ CODE
     assert_equal(s2, s)
 
     fs = "".freeze
-    assert_raise(RuntimeError) { fs.replace("a") }
-    assert_raise(RuntimeError) { fs.replace(fs) }
+    assert_raise(FrozenError) { fs.replace("a") }
+    assert_raise(FrozenError) { fs.replace(fs) }
     assert_raise(ArgumentError) { fs.replace() }
-    assert_raise(RuntimeError) { fs.replace(42) }
+    assert_raise(FrozenError) { fs.replace(42) }
   end
 
   def test_reverse
@@ -1632,8 +1709,46 @@ CODE
     assert_equal([S("a"), S(""), S("b"), S("c"), S("")], S("a||b|c|").split(S('|'), -1))
 
     assert_equal([], "".split(//, 1))
+  ensure
+    $; = fs
+  end
 
-    assert_equal("[2, 3]", [1,2,3].slice!(1,10000).inspect, "moved from btest/knownbug")
+  def test_split_with_block
+    fs, $; = $;, nil
+    result = []; S(" a   b\t c ").split {|s| result << s}
+    assert_equal([S("a"), S("b"), S("c")], result)
+    result = []; S(" a   b\t c ").split(S(" ")) {|s| result << s}
+    assert_equal([S("a"), S("b"), S("c")], result)
+
+    result = []; S(" a | b | c ").split(S("|")) {|s| result << s}
+    assert_equal([S(" a "), S(" b "), S(" c ")], result)
+
+    result = []; S("aXXbXXcXX").split(/X./) {|s| result << s}
+    assert_equal([S("a"), S("b"), S("c")], result)
+
+    result = []; S("abc").split(//) {|s| result << s}
+    assert_equal([S("a"), S("b"), S("c")], result)
+
+    result = []; S("a|b|c").split(S('|'), 1) {|s| result << s}
+    assert_equal([S("a|b|c")], result)
+
+    result = []; S("a|b|c").split(S('|'), 2) {|s| result << s}
+    assert_equal([S("a"), S("b|c")], result)
+    result = []; S("a|b|c").split(S('|'), 3) {|s| result << s}
+    assert_equal([S("a"), S("b"), S("c")], result)
+
+    result = []; S("a|b|c|").split(S('|'), -1) {|s| result << s}
+    assert_equal([S("a"), S("b"), S("c"), S("")], result)
+    result = []; S("a|b|c||").split(S('|'), -1) {|s| result << s}
+    assert_equal([S("a"), S("b"), S("c"), S(""), S("")], result)
+
+    result = []; S("a||b|c|").split(S('|')) {|s| result << s}
+    assert_equal([S("a"), S(""), S("b"), S("c")], result)
+    result = []; S("a||b|c|").split(S('|'), -1) {|s| result << s}
+    assert_equal([S("a"), S(""), S("b"), S("c"), S("")], result)
+
+    result = []; "".split(//, 1) {|s| result << s}
+    assert_equal([], result)
   ensure
     $; = fs
   end
@@ -1696,6 +1811,7 @@ CODE
     s.split("b", 1).map(&:upcase!)
     assert_equal("abc", s)
   end
+
   def test_squeeze
     assert_equal(S("abc"), S("aaabbbbccc").squeeze)
     assert_equal(S("aa bb cc"), S("aa   bb      cc").squeeze(S(" ")))
@@ -2272,7 +2388,7 @@ CODE
   end
 
   def test_frozen_check
-    assert_raise(RuntimeError) {
+    assert_raise(FrozenError) {
       s = ""
       s.sub!(/\A/) { s.freeze; "zzz" }
     }
@@ -2710,7 +2826,7 @@ CODE
     assert_equal("bba", s)
 
     s = S("ax").freeze
-    assert_raise_with_message(RuntimeError, /frozen/) {s.delete_prefix!("a")}
+    assert_raise_with_message(FrozenError, /frozen/) {s.delete_prefix!("a")}
 
     s = S("ax")
     o = Struct.new(:s).new(s)
@@ -2718,7 +2834,7 @@ CODE
       s.freeze
       "a"
     end
-    assert_raise_with_message(RuntimeError, /frozen/) {s.delete_prefix!(o)}
+    assert_raise_with_message(FrozenError, /frozen/) {s.delete_prefix!(o)}
   end
 
   def test_delete_suffix
@@ -2778,7 +2894,7 @@ CODE
     assert_raise(TypeError) { 'hello'.delete_suffix!(/hel/) }
 
     s = S("hello").freeze
-    assert_raise_with_message(RuntimeError, /frozen/) {s.delete_suffix!('lo')}
+    assert_raise_with_message(FrozenError, /frozen/) {s.delete_suffix!('lo')}
 
     s = S("ax")
     o = Struct.new(:s).new(s)
@@ -2786,7 +2902,7 @@ CODE
       s.freeze
       "x"
     end
-    assert_raise_with_message(RuntimeError, /frozen/) {s.delete_suffix!(o)}
+    assert_raise_with_message(FrozenError, /frozen/) {s.delete_suffix!(o)}
 
     s = S("hello")
     assert_equal("hel", s.delete_suffix!('lo'))
@@ -3021,6 +3137,12 @@ CODE
     assert_equal("a", "a".chr)
     assert_equal("\u3042", "\u3042\u3043".chr)
     assert_equal('', ''.chr)
+  end
+
+  def test_substr_code_range
+    data = "\xff" + "a"*200
+    assert_not_predicate(data, :valid_encoding?)
+    assert_predicate(data[100..-1], :valid_encoding?)
   end
 end
 

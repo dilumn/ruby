@@ -800,7 +800,7 @@ module DRb
     module_function :uri_option
 
     def auto_load(uri)  # :nodoc:
-      if uri =~ /^drb([a-z0-9]+):/
+      if /\Adrb([a-z0-9]+):/ =~ uri
         require("drb/#{$1}") rescue nil
       end
     end
@@ -816,13 +816,13 @@ module DRb
     # :stopdoc:
     private
     def self.parse_uri(uri)
-      if uri =~ /^druby:\/\/(.*?):(\d+)(\?(.*))?$/
+      if /\Adruby:\/\/(.*?):(\d+)(\?(.*))?\z/ =~ uri
         host = $1
         port = $2.to_i
         option = $4
         [host, port, option]
       else
-        raise(DRbBadScheme, uri) unless uri =~ /^druby:/
+        raise(DRbBadScheme, uri) unless uri.start_with?('druby:')
         raise(DRbBadURI, 'can\'t parse uri:' + uri)
       end
     end
@@ -847,7 +847,11 @@ module DRb
     def self.getservername
       host = Socket::gethostname
       begin
-        Socket::gethostbyname(host)[0]
+        Socket::getaddrinfo(host, nil,
+                                  Socket::AF_UNSPEC,
+                                  Socket::SOCK_STREAM,
+                                  0,
+                                  Socket::AI_PASSIVE)[0][3]
       rescue
         'localhost'
       end
@@ -1172,7 +1176,7 @@ module DRb
       bt = []
       result.backtrace.each do |x|
         break if /`__send__'$/ =~ x
-        if /^\(druby:\/\// =~ x
+        if /\A\(druby:\/\// =~ x
           bt.push(x)
         else
           bt.push(prefix + x)
@@ -1466,12 +1470,7 @@ module DRb
       if  Thread.current['DRb'] && Thread.current['DRb']['server'] == self
         Thread.current['DRb']['stop_service'] = true
       else
-        if @protocol.respond_to? :shutdown
-          @protocol.shutdown
-        else
-          [@thread, *@grp.list].each {|thread| thread.kill} # xxx: Thread#kill
-        end
-        @thread.join
+        shutdown
       end
     end
 
@@ -1489,6 +1488,18 @@ module DRb
     end
 
     private
+
+    def shutdown
+      current = Thread.current
+      if @protocol.respond_to? :shutdown
+        @protocol.shutdown
+      else
+        [@thread, *@grp.list].each { |thread|
+          thread.kill unless thread == current # xxx: Thread#kill
+        }
+      end
+      @thread.join unless @thread == current
+    end
 
     ##
     # Starts the DRb main loop in a new thread.
@@ -1564,17 +1575,23 @@ module DRb
         if $SAFE < @safe_level
           info = Thread.current['DRb']
           if @block
-            @result = Thread.new {
+            @result = Thread.new do
               Thread.current['DRb'] = info
+              prev_safe_level = $SAFE
               $SAFE = @safe_level
               perform_with_block
-            }.value
+            ensure
+              $SAFE = prev_safe_level
+            end.value
           else
-            @result = Thread.new {
+            @result = Thread.new do
               Thread.current['DRb'] = info
+              prev_safe_level = $SAFE
               $SAFE = @safe_level
               perform_without_block
-            }.value
+            ensure
+              $SAFE = prev_safe_level
+            end.value
           end
         else
           if @block
@@ -1672,7 +1689,8 @@ module DRb
           ensure
             client.close unless succ
             if Thread.current['DRb']['stop_service']
-              Thread.new { stop_service }
+              shutdown
+              break
             end
             break unless succ
           end

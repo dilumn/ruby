@@ -1,6 +1,7 @@
 # -*- coding: us-ascii -*-
 # frozen_string_literal: false
 require 'test/unit'
+require "rbconfig/sizeof"
 
 class TestThread < Test::Unit::TestCase
   class Thread < ::Thread
@@ -102,7 +103,7 @@ class TestThread < Test::Unit::TestCase
   def test_thread_variable_frozen
     t = Thread.new { }.join
     t.freeze
-    assert_raise(RuntimeError) do
+    assert_raise(FrozenError) do
       t.thread_variable_set(:foo, "bar")
     end
   end
@@ -227,6 +228,21 @@ class TestThread < Test::Unit::TestCase
     t3.kill if t3
   end
 
+  def test_join_limits
+    [ RbConfig::LIMITS['FIXNUM_MAX'], RbConfig::LIMITS['UINT64_MAX'],
+      Float::INFINITY ].each do |limit|
+      t = Thread.new {}
+      assert_same t, t.join(limit), "limit=#{limit.inspect}"
+    end
+    t = Thread.new { sleep }
+    [ -1, -0.1, RbConfig::LIMITS['FIXNUM_MIN'], RbConfig::LIMITS['INT64_MIN'],
+      -Float::INFINITY
+    ].each do |limit|
+      assert_nil t.join(limit), "limit=#{limit.inspect}"
+    end
+    t.kill
+  end
+
   def test_kill_main_thread
     assert_in_out_err([], <<-INPUT, %w(1), [])
       p 1
@@ -271,6 +287,7 @@ class TestThread < Test::Unit::TestCase
       s += 1
     end
     Thread.pass until t.stop?
+    sleep 1 if RubyVM::MJIT.enabled? # t.stop? behaves unexpectedly with --jit-wait
     assert_equal(1, s)
     t.wakeup
     Thread.pass while t.alive?
@@ -317,7 +334,10 @@ class TestThread < Test::Unit::TestCase
     assert_in_out_err([], <<-INPUT, %w(false 1), [])
       p Thread.abort_on_exception
       begin
-        t = Thread.new { raise }
+        t = Thread.new {
+          Thread.current.report_on_exception = false
+          raise
+        }
         Thread.pass until t.stop?
         p 1
       rescue
@@ -329,7 +349,10 @@ class TestThread < Test::Unit::TestCase
       Thread.abort_on_exception = true
       p Thread.abort_on_exception
       begin
-        Thread.new { raise }
+        Thread.new {
+          Thread.current.report_on_exception = false
+          raise
+        }
         sleep 0.5
         p 1
       rescue
@@ -352,7 +375,11 @@ class TestThread < Test::Unit::TestCase
       p Thread.abort_on_exception
       begin
         ok = false
-        t = Thread.new { Thread.pass until ok; raise }
+        t = Thread.new {
+          Thread.current.report_on_exception = false
+          Thread.pass until ok
+          raise
+        }
         t.abort_on_exception = true
         p t.abort_on_exception
         ok = 1
@@ -370,17 +397,20 @@ class TestThread < Test::Unit::TestCase
       q1 = Thread::Queue.new
       q2 = Thread::Queue.new
 
-      assert_equal(false, Thread.report_on_exception,
-                   "global flags is false by default")
-      assert_equal(false, Thread.current.report_on_exception)
+      assert_equal(true, Thread.report_on_exception,
+                   "global flag is true by default")
+      assert_equal(true, Thread.current.report_on_exception,
+                   "the main thread has report_on_exception=true")
 
-      Thread.current.report_on_exception = true
-      assert_equal(false,
+      Thread.report_on_exception = true
+      Thread.current.report_on_exception = false
+      assert_equal(true,
                    Thread.start {Thread.current.report_on_exception}.value,
-                  "should not inherit from the parent thread")
+                  "should not inherit from the parent thread but from the global flag")
 
-      assert_warn("", "exception should be ignored silently") {
+      assert_warn("", "exception should be ignored silently when false") {
         th = Thread.start {
+          Thread.current.report_on_exception = false
           q1.push(Thread.current.report_on_exception)
           raise "report 1"
         }
@@ -388,7 +418,7 @@ class TestThread < Test::Unit::TestCase
         Thread.pass while th.alive?
       }
 
-      assert_warn(/report 2/, "exception should be reported") {
+      assert_warn(/report 2/, "exception should be reported when true") {
         th = Thread.start {
           q1.push(Thread.current.report_on_exception = true)
           raise "report 2"
@@ -397,8 +427,8 @@ class TestThread < Test::Unit::TestCase
         Thread.pass while th.alive?
       }
 
-      assert_equal(false, Thread.report_on_exception)
       assert_warn("", "the global flag should not affect already started threads") {
+        Thread.report_on_exception = false
         th = Thread.start {
           q2.pop
           q1.push(Thread.current.report_on_exception)
@@ -409,8 +439,8 @@ class TestThread < Test::Unit::TestCase
         Thread.pass while th.alive?
       }
 
-      assert_equal(true, Thread.report_on_exception)
       assert_warn(/report 4/, "should defaults to the global flag at the start") {
+        Thread.report_on_exception = true
         th = Thread.start {
           q1.push(Thread.current.report_on_exception)
           raise "report 4"
@@ -419,7 +449,7 @@ class TestThread < Test::Unit::TestCase
         Thread.pass while th.alive?
       }
 
-      assert_warn(/report 5/, "should defaults to the global flag at the start") {
+      assert_warn(/report 5/, "should first report and then raise with report_on_exception + abort_on_exception") {
         th = Thread.start {
           Thread.current.report_on_exception = true
           Thread.current.abort_on_exception = true
@@ -435,7 +465,10 @@ class TestThread < Test::Unit::TestCase
   end
 
   def test_status_and_stop_p
-    a = ::Thread.new { raise("die now") }
+    a = ::Thread.new {
+      Thread.current.report_on_exception = false
+      raise("die now")
+    }
     b = Thread.new { Thread.stop }
     c = Thread.new { Thread.exit }
     e = Thread.current
@@ -489,10 +522,10 @@ class TestThread < Test::Unit::TestCase
       sleep
     end
     Thread.pass until ok
-    assert_equal(0, Thread.current.safe_level)
-    assert_equal(1, t.safe_level)
-
+    assert_equal($SAFE, Thread.current.safe_level)
+    assert_equal($SAFE, t.safe_level)
   ensure
+    $SAFE = 0
     t.kill if t
   end
 
@@ -541,19 +574,21 @@ class TestThread < Test::Unit::TestCase
     assert_equal(3, t.fetch("qux") {x = 3})
     assert_equal(3, x)
 
-    assert_raise(KeyError) {t.fetch(:qux)}
+    e = assert_raise(KeyError) {t.fetch(:qux)}
+    assert_equal(:qux, e.key)
+    assert_equal(t, e.receiver)
   ensure
     t.kill if t
   end
 
   def test_thread_local_security
-    assert_raise(RuntimeError) do
-      Thread.new do
-        Thread.current[:foo] = :bar
-        Thread.current.freeze
+    Thread.new do
+      Thread.current[:foo] = :bar
+      Thread.current.freeze
+      assert_raise(FrozenError) do
         Thread.current[:foo] = :baz
-      end.join
-    end
+      end
+    end.join
   end
 
   def test_thread_local_dynamic_symbol
@@ -602,11 +637,11 @@ class TestThread < Test::Unit::TestCase
   def test_mutex_illegal_unlock
     m = Thread::Mutex.new
     m.lock
-    assert_raise(ThreadError) do
-      Thread.new do
+    Thread.new do
+      assert_raise(ThreadError) do
         m.unlock
-      end.join
-    end
+      end
+    end.join
   end
 
   def test_mutex_fifo_like_lock
@@ -754,12 +789,12 @@ class TestThread < Test::Unit::TestCase
     r=:ng
     e=Class.new(Exception)
     th_s = Thread.current
-    begin
-      th = Thread.start{
+    th = Thread.start{
+      assert_raise(RuntimeError) {
         Thread.handle_interrupt(Object => :on_blocking){
           begin
             Thread.pass until r == :wait
-            Thread.current.raise RuntimeError
+            Thread.current.raise RuntimeError, "will raise in sleep"
             r = :ok
             sleep
           ensure
@@ -767,11 +802,9 @@ class TestThread < Test::Unit::TestCase
           end
         }
       }
-      assert_raise(e) {r = :wait; sleep 0.2}
-      assert_raise(RuntimeError) {th.join(0.2)}
-    ensure
-      th.kill
-    end
+    }
+    assert_raise(e) {r = :wait; sleep 0.2}
+    th.join
     assert_equal(:ok,r)
   end
 
@@ -780,6 +813,7 @@ class TestThread < Test::Unit::TestCase
       th_waiting = true
 
       t = Thread.new {
+        Thread.current.report_on_exception = false
         Thread.handle_interrupt(RuntimeError => :on_blocking) {
           nil while th_waiting
           # async interrupt should be raised _before_ writing puts arguments
@@ -800,6 +834,7 @@ class TestThread < Test::Unit::TestCase
       th_waiting = false
 
       t = Thread.new {
+        Thread.current.report_on_exception = false
         Thread.handle_interrupt(RuntimeError => :on_blocking) {
           th_waiting = true
           nil while th_waiting
@@ -956,11 +991,11 @@ _eom
   end
 
   def test_thread_join_main_thread
-    assert_raise(ThreadError) do
-      Thread.new(Thread.current) {|t|
+    Thread.new(Thread.current) {|t|
+      assert_raise(ThreadError) do
         t.join
-      }.join
-    end
+      end
+    }.join
   end
 
   def test_main_thread_status_at_exit
@@ -1004,31 +1039,30 @@ q.pop
     ary = []
 
     t = Thread.new {
-      begin
-        ary << Thread.current.status
-        sleep #1
-      ensure
+      assert_raise(RuntimeError) do
         begin
           ary << Thread.current.status
-          sleep #2
+          sleep #1
         ensure
-          ary << Thread.current.status
+          begin
+            ary << Thread.current.status
+            sleep #2
+          ensure
+            ary << Thread.current.status
+          end
         end
       end
     }
 
-    begin
-      Thread.pass until ary.size >= 1
-      Thread.pass until t.stop?
-      t.kill  # wake up sleep #1
-      Thread.pass until ary.size >= 2
-      Thread.pass until t.stop?
-      t.raise "wakeup" # wake up sleep #2
-      Thread.pass while t.alive?
-      assert_equal(ary, ["run", "aborting", "aborting"])
-    ensure
-      t.join rescue nil
-    end
+    Thread.pass until ary.size >= 1
+    Thread.pass until t.stop?
+    t.kill  # wake up sleep #1
+    Thread.pass until ary.size >= 2
+    Thread.pass until t.stop?
+    t.raise "wakeup" # wake up sleep #2
+    Thread.pass while t.alive?
+    assert_equal(ary, ["run", "aborting", "aborting"])
+    t.join
   end
 
   def test_mutex_owned
@@ -1171,6 +1205,17 @@ q.pop
     assert_predicate(status, :success?, bug9751)
   end if Process.respond_to?(:fork)
 
+  def test_fork_while_locked
+    m = Mutex.new
+    thrs = []
+    3.times do |i|
+      thrs << Thread.new { m.synchronize { Process.waitpid2(fork{})[1] } }
+    end
+    thrs.each do |t|
+      assert_predicate t.value, :success?, '[ruby-core:85940] [Bug #14578]'
+    end
+  end if Process.respond_to?(:fork)
+
   def test_subclass_no_initialize
     t = Module.new do
       break eval("class C\u{30b9 30ec 30c3 30c9} < Thread; self; end")
@@ -1226,11 +1271,64 @@ q.pop
 
   def test_thread_interrupt_for_killed_thread
     assert_normal_exit(<<-_end, '[Bug #8996]', timeout: 5, timeout_error: nil)
+      Thread.report_on_exception = false
       trap(:TERM){exit}
       while true
         t = Thread.new{sleep 0}
         t.raise Interrupt
       end
     _end
+  end
+
+  def test_signal_at_join
+    if /mswin|mingw/ =~ RUBY_PLATFORM
+      skip "can't trap a signal from another process on Windows"
+      # opt = {new_pgroup: true}
+    end
+    assert_separately([], "#{<<~"{#"}\n#{<<~'};'}", timeout: 120)
+    {#
+      n = 1000
+      sig = :INT
+      trap(sig) {}
+      IO.popen([EnvUtil.rubybin, "-e", "#{<<~"{#1"}\n#{<<~'};#1'}"], "r+") do |f|
+        tpid = #{$$}
+        sig = :#{sig}
+        {#1
+          STDOUT.sync = true
+          while gets
+            puts
+            Process.kill(sig, tpid)
+          end
+        };#1
+        assert_nothing_raised do
+          n.times do
+            w = Thread.start do
+              sleep 30
+            end
+            begin
+              f.puts
+              f.gets
+            ensure
+              w.kill
+              w.join
+            end
+          end
+        end
+        n.times do
+          w = Thread.start { sleep 30 }
+          begin
+            f.puts
+            f.gets
+          ensure
+            w.kill
+            t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            w.join(30)
+            t1 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            diff = t1 - t0
+            assert_operator diff, :<=, 2
+          end
+        end
+      end
+    };
   end
 end

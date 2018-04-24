@@ -26,14 +26,16 @@ extern "C" {
 #include RUBY_EXTCONF_H
 #endif
 
+#include "defines.h"
+
 #if defined(__cplusplus)
 /* __builtin_choose_expr and __builtin_types_compatible aren't available
  * on C++.  See https://gcc.gnu.org/onlinedocs/gcc/Other-Builtins.html */
 # undef HAVE_BUILTIN___BUILTIN_CHOOSE_EXPR_CONSTANT_P
 # undef HAVE_BUILTIN___BUILTIN_TYPES_COMPATIBLE_P
+#elif GCC_VERSION_BEFORE(4,8,6) /* Bug #14221 */
+# undef HAVE_BUILTIN___BUILTIN_CHOOSE_EXPR_CONSTANT_P
 #endif
-
-#include "defines.h"
 
 #ifndef ASSUME
 # ifdef UNREACHABLE
@@ -110,6 +112,9 @@ typedef char ruby_check_sizeof_voidp[SIZEOF_VOIDP == sizeof(void*) ? 1 : -1];
 #endif
 #ifndef PRI_LONG_PREFIX
 #define PRI_LONG_PREFIX "l"
+#endif
+#ifndef PRI_SHORT_PREFIX
+#define PRI_SHORT_PREFIX "h"
 #endif
 
 #if SIZEOF_LONG == 8
@@ -233,10 +238,10 @@ typedef char ruby_check_sizeof_voidp[SIZEOF_VOIDP == sizeof(void*) ? 1 : -1];
 #define RB_LONG2FIX(i) RB_INT2FIX(i)
 #define LONG2FIX(i) RB_INT2FIX(i)
 #define rb_fix_new(v) RB_INT2FIX(v)
-VALUE rb_int2inum(SIGNED_VALUE);
+VALUE rb_int2inum(intptr_t);
 
 #define rb_int_new(v) rb_int2inum(v)
-VALUE rb_uint2inum(VALUE);
+VALUE rb_uint2inum(uintptr_t);
 
 #define rb_uint_new(v) rb_uint2inum(v)
 
@@ -628,7 +633,7 @@ int ruby_safe_level_2_warning(void) __attribute__((const,warning("$SAFE=2 to 4 a
 # define rb_set_safe_level(level) rb_set_safe_level(RUBY_SAFE_LEVEL_CHECK(level, error))
 #endif
 void rb_set_safe_level_force(int);
-CONSTFUNC(void rb_secure_update(VALUE));
+void rb_secure_update(VALUE);
 NORETURN(void rb_insecure_operation(void));
 
 VALUE rb_errinfo(void);
@@ -742,8 +747,8 @@ rb_num2ll_inline(VALUE x)
 double rb_num2dbl(VALUE);
 #define NUM2DBL(x) rb_num2dbl((VALUE)(x))
 
-VALUE rb_uint2big(VALUE);
-VALUE rb_int2big(SIGNED_VALUE);
+VALUE rb_uint2big(uintptr_t);
+VALUE rb_int2big(intptr_t);
 
 VALUE rb_newobj(void);
 VALUE rb_newobj_of(VALUE, VALUE);
@@ -851,14 +856,10 @@ enum ruby_fl_type {
     RUBY_FL_SINGLETON = RUBY_FL_USER0
 };
 
-struct RBasic {
+struct RUBY_ALIGNAS(SIZEOF_VALUE) RBasic {
     VALUE flags;
     const VALUE klass;
-}
-#ifdef __GNUC__
-    __attribute__((aligned(sizeof(VALUE))))
-#endif
-;
+};
 
 VALUE rb_obj_hide(VALUE obj);
 VALUE rb_obj_reveal(VALUE obj, VALUE klass); /* do not use this API to change klass information */
@@ -951,6 +952,7 @@ enum ruby_rstring_flags {
 
     RSTRING_ENUM_END
 };
+
 struct RString {
     struct RBasic basic;
     union {
@@ -1149,10 +1151,10 @@ void *rb_check_typeddata(VALUE, const rb_data_type_t *);
     (void)((sval) = (type *)DATA_PTR(result));
 
 #ifdef __GNUC__
-#define Data_Make_Struct(klass,type,mark,free,sval) ({\
+#define Data_Make_Struct(klass,type,mark,free,sval) RB_GNUC_EXTENSION_BLOCK(\
     Data_Make_Struct0(data_struct_obj, klass, type, sizeof(type), mark, free, sval); \
-    data_struct_obj; \
-})
+    data_struct_obj \
+)
 #else
 #define Data_Make_Struct(klass,type,mark,free,sval) (\
     rb_data_object_make((klass),(RUBY_DATA_FUNC)(mark),(RUBY_DATA_FUNC)(free),(void **)&(sval),sizeof(type)) \
@@ -1167,10 +1169,10 @@ void *rb_check_typeddata(VALUE, const rb_data_type_t *);
     (void)((sval) = (type *)DATA_PTR(result));
 
 #ifdef __GNUC__
-#define TypedData_Make_Struct(klass, type, data_type, sval) ({\
+#define TypedData_Make_Struct(klass, type, data_type, sval) RB_GNUC_EXTENSION_BLOCK(\
     TypedData_Make_Struct0(data_struct_obj, klass, type, sizeof(type), data_type, sval); \
-    data_struct_obj; \
-})
+    data_struct_obj \
+)
 #else
 #define TypedData_Make_Struct(klass, type, data_type, sval) (\
     rb_data_typed_object_make((klass),(data_type),(void **)&(sval),sizeof(type)) \
@@ -1572,10 +1574,15 @@ rb_num2char_inline(VALUE x)
 
 #define LONG2NUM(x) RB_LONG2NUM(x)
 #define ULONG2NUM(x) RB_ULONG2NUM(x)
+#define USHORT2NUM(x) RB_INT2FIX(x)
 #define NUM2CHR(x) RB_NUM2CHR(x)
 #define CHR2FIX(x) RB_CHR2FIX(x)
 
+#if SIZEOF_LONG < SIZEOF_VALUE
+#define RB_ST2FIX(h) RB_LONG2FIX((long)((h) > 0 ? (h) & (unsigned long)-1 >> 2 : (h) | ~((unsigned long)-1 >> 2)))
+#else
 #define RB_ST2FIX(h) RB_LONG2FIX((long)(h))
+#endif
 #define ST2FIX(h) RB_ST2FIX(h)
 
 #define RB_ALLOC_N(type,n) ((type*)ruby_xmalloc2((size_t)(n),sizeof(type)))
@@ -1590,7 +1597,23 @@ rb_num2char_inline(VALUE x)
 #define ZALLOC(type) RB_ZALLOC(type)
 #define REALLOC_N(var,type,n) RB_REALLOC_N(var,type,n)
 
+#if GCC_VERSION_BEFORE(4,9,5)
+/* GCC 4.9.2 reportedly has this feature and is broken.
+ * The function is not officially documented below.
+ * Seems we should not use it.
+ * https://gcc.gnu.org/onlinedocs/gcc-4.9.4/gcc/Other-Builtins.html#Other-Builtins */
+# undef HAVE_BUILTIN___BUILTIN_ALLOCA_WITH_ALIGN
+#endif
+
+#if defined(HAVE_BUILTIN___BUILTIN_ALLOCA_WITH_ALIGN) && defined(RUBY_ALIGNOF)
+/* I don't know why but __builtin_alloca_with_align's second argument
+   takes bits rather than bytes. */
+#define ALLOCA_N(type, n) \
+    (type*)__builtin_alloca_with_align((sizeof(type)*(n)), \
+        RUBY_ALIGNOF(type) * CHAR_BIT)
+#else
 #define ALLOCA_N(type,n) ((type*)alloca(sizeof(type)*(n)))
+#endif
 
 void *rb_alloc_tmp_buffer(volatile VALUE *store, long len) RUBY_ATTR_ALLOC_SIZE((2));
 void *rb_alloc_tmp_buffer_with_count(volatile VALUE *store, size_t len,size_t count) RUBY_ATTR_ALLOC_SIZE((2,3));
@@ -1757,15 +1780,19 @@ VALUE rb_check_symbol(volatile VALUE *namep);
     (((argc) <= (vargc)) ? (argc) : \
      (rb_fatal("argc(%d) exceeds actual arguments(%d)", \
 	       argc, vargc), 0))
+# define rb_varargs_argc_valid_p(argc, vargc) \
+    ((argc) == 0 ? (vargc) <= 1 : /* [ruby-core:85266] [Bug #14425] */ \
+     (argc) == (vargc))
 # if defined(HAVE_BUILTIN___BUILTIN_CHOOSE_EXPR_CONSTANT_P)
 #   if HAVE_ATTRIBUTE_ERRORFUNC
 ERRORFUNC((" argument length doesn't match"), int rb_varargs_bad_length(int,int));
 #   else
-#     define rb_varargs_bad_length(argc, vargc) ((argc)/((argc) == (vargc)))
+#     define rb_varargs_bad_length(argc, vargc) \
+	((argc)/rb_varargs_argc_valid_p(argc, vargc))
 #   endif
 #   define rb_varargs_argc_check(argc, vargc) \
     __builtin_choose_expr(__builtin_constant_p(argc), \
-	(((argc) == (vargc)) ? (argc) : \
+	(rb_varargs_argc_valid_p(argc, vargc) ? (argc) : \
 	 rb_varargs_bad_length(argc, vargc)), \
 	rb_varargs_argc_check_runtime(argc, vargc))
 # else
@@ -1898,19 +1925,20 @@ RUBY_EXTERN VALUE rb_cBignum;
 RUBY_EXTERN VALUE rb_cBinding;
 RUBY_EXTERN VALUE rb_cClass;
 RUBY_EXTERN VALUE rb_cCont;
-RUBY_EXTERN VALUE rb_cDir;
 RUBY_EXTERN VALUE rb_cData;
-RUBY_EXTERN VALUE rb_cFalseClass;
+RUBY_EXTERN VALUE rb_cDir;
 RUBY_EXTERN VALUE rb_cEncoding;
 RUBY_EXTERN VALUE rb_cEnumerator;
+RUBY_EXTERN VALUE rb_cFalseClass;
 RUBY_EXTERN VALUE rb_cFile;
 #ifndef RUBY_INTEGER_UNIFICATION
 RUBY_EXTERN VALUE rb_cFixnum;
 #endif
+RUBY_EXTERN VALUE rb_cComplex;
 RUBY_EXTERN VALUE rb_cFloat;
 RUBY_EXTERN VALUE rb_cHash;
-RUBY_EXTERN VALUE rb_cInteger;
 RUBY_EXTERN VALUE rb_cIO;
+RUBY_EXTERN VALUE rb_cInteger;
 RUBY_EXTERN VALUE rb_cMatch;
 RUBY_EXTERN VALUE rb_cMethod;
 RUBY_EXTERN VALUE rb_cModule;
@@ -1921,7 +1949,6 @@ RUBY_EXTERN VALUE rb_cProc;
 RUBY_EXTERN VALUE rb_cRandom;
 RUBY_EXTERN VALUE rb_cRange;
 RUBY_EXTERN VALUE rb_cRational;
-RUBY_EXTERN VALUE rb_cComplex;
 RUBY_EXTERN VALUE rb_cRegexp;
 RUBY_EXTERN VALUE rb_cStat;
 RUBY_EXTERN VALUE rb_cString;
@@ -1946,6 +1973,7 @@ RUBY_EXTERN VALUE rb_eKeyError;
 RUBY_EXTERN VALUE rb_eRangeError;
 RUBY_EXTERN VALUE rb_eIOError;
 RUBY_EXTERN VALUE rb_eRuntimeError;
+RUBY_EXTERN VALUE rb_eFrozenError;
 RUBY_EXTERN VALUE rb_eSecurityError;
 RUBY_EXTERN VALUE rb_eSystemCallError;
 RUBY_EXTERN VALUE rb_eThreadError;
@@ -2096,8 +2124,7 @@ int ruby_native_thread_p(void);
 #define RUBY_EVENT_TRACEPOINT_ALL    0xffff
 
 /* special events */
-#define RUBY_EVENT_SPECIFIED_LINE         0x010000
-#define RUBY_EVENT_COVERAGE               0x020000
+#define RUBY_EVENT_RESERVED_FOR_INTERNAL_USE 0x030000
 
 /* internal events */
 #define RUBY_INTERNAL_EVENT_SWITCH          0x040000
@@ -2111,7 +2138,7 @@ int ruby_native_thread_p(void);
 #define RUBY_INTERNAL_EVENT_GC_ENTER       0x2000000
 #define RUBY_INTERNAL_EVENT_GC_EXIT        0x4000000
 #define RUBY_INTERNAL_EVENT_OBJSPACE_MASK  0x7f00000
-#define RUBY_INTERNAL_EVENT_MASK          0xfffe0000
+#define RUBY_INTERNAL_EVENT_MASK          0xffff0000
 
 typedef uint32_t rb_event_flag_t;
 typedef void (*rb_event_hook_func_t)(rb_event_flag_t evflag, VALUE data, VALUE self, ID mid, VALUE klass);
@@ -2166,7 +2193,7 @@ unsigned long ruby_strtoul(const char *str, char **endptr, int base);
 PRINTF_ARGS(int ruby_snprintf(char *str, size_t n, char const *fmt, ...), 3, 4);
 int ruby_vsnprintf(char *str, size_t n, char const *fmt, va_list ap);
 
-#if defined(HAVE_BUILTIN___BUILTIN_CHOOSE_EXPR_CONSTANT_P) && defined(__OPTIMIZE__)
+#if defined(HAVE_BUILTIN___BUILTIN_CHOOSE_EXPR_CONSTANT_P) && defined(HAVE_VA_ARGS_MACRO) && defined(__OPTIMIZE__)
 # define rb_scan_args(argc,argvp,fmt,...) \
     __builtin_choose_expr(__builtin_constant_p(fmt), \
         rb_scan_args0(argc,argvp,fmt,\
@@ -2223,7 +2250,7 @@ ERRORFUNC(("variable argument length doesn't match"), int rb_scan_args_length_mi
 
 # ifdef __GNUC__
 # define rb_scan_args_verify(fmt, varc) \
-    ({ \
+    __extension__ ({ \
 	int verify; \
 	_Pragma("GCC diagnostic push"); \
 	_Pragma("GCC diagnostic ignored \"-Warray-bounds\""); \
@@ -2442,7 +2469,7 @@ rb_scan_args_set(int argc, const VALUE *argv,
 }
 #endif
 
-#if defined(__GNUC__) && defined(__OPTIMIZE__)
+#if defined(__GNUC__) && defined(HAVE_VA_ARGS_MACRO) && defined(__OPTIMIZE__)
 # define rb_yield_values(argc, ...) \
 __extension__({ \
 	const int rb_yield_values_argc = (argc); \

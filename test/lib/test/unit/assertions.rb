@@ -474,7 +474,7 @@ EOT
         failed = []
         obj.each do |*a, &b|
           if blk.call(*a, &b)
-            failed << a.size > 1 ? a : a[0]
+            failed << (a.size > 1 ? a : a[0])
           end
         end
         assert(failed.empty?, message(m) {failed.pretty_inspect})
@@ -678,8 +678,8 @@ eom
       end
 
       def assert_warning(pat, msg = nil)
-        stderr = EnvUtil.verbose_warning {
-          EnvUtil.with_default_internal(pat.encoding) {
+        stderr = EnvUtil.with_default_internal(pat.encoding) {
+          EnvUtil.verbose_warning {
             yield
           }
         }

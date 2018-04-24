@@ -7,7 +7,7 @@ require 'pathname'
 require 'tmpdir'
 
 # TODO: push this up to test_case.rb once battle tested
-$SAFE=1
+
 $LOAD_PATH.map! do |path|
   path.dup.untaint
 end
@@ -463,7 +463,7 @@ class TestGem < Gem::TestCase
     assert File.directory?(util_cache_dir)
   end
 
-  unless win_platform? then # only for FS that support write protection
+  unless win_platform? || Process.uid.zero? then # only for FS that support write protection
     def test_self_ensure_gem_directories_write_protected
       gemdir = File.join @tempdir, "egd"
       FileUtils.rm_r gemdir rescue nil
@@ -775,7 +775,7 @@ class TestGem < Gem::TestCase
   end
 
   def test_self_read_binary
-    open 'test', 'w' do |io|
+    File.open 'test', 'w' do |io|
       io.write "\xCF\x80"
     end
 
@@ -1480,8 +1480,11 @@ class TestGem < Gem::TestCase
   end
 
   LIB_PATH = File.expand_path "../../../lib".dup.untaint, __FILE__.dup.untaint
-  BUNDLER_LIB_PATH = File.expand_path $LOAD_PATH.find {|lp| File.file?(File.join(lp, "bundler.rb")) }.dup.untaint
-  BUNDLER_FULL_NAME = "bundler-#{Bundler::VERSION}"
+
+  if Gem::USE_BUNDLER_FOR_GEMDEPS
+    BUNDLER_LIB_PATH = File.expand_path $LOAD_PATH.find {|lp| File.file?(File.join(lp, "bundler.rb")) }.dup.untaint
+    BUNDLER_FULL_NAME = "bundler-#{Bundler::VERSION}"
+  end
 
   def add_bundler_full_name(names)
     return names unless Gem::USE_BUNDLER_FOR_GEMDEPS
@@ -1529,7 +1532,7 @@ class TestGem < Gem::TestCase
     out = IO.popen(cmd, &:read).split(/\n/)
 
     assert_equal ["b-1", "c-1"], out - out0
-  end
+  end if Gem::USE_BUNDLER_FOR_GEMDEPS
 
   def test_looks_for_gemdeps_files_automatically_on_start_in_parent_dir
     util_clear_gems
@@ -1574,7 +1577,7 @@ class TestGem < Gem::TestCase
     Dir.rmdir "sub1"
 
     assert_equal ["b-1", "c-1"], out - out0
-  end
+  end if Gem::USE_BUNDLER_FOR_GEMDEPS
 
   def test_register_default_spec
     Gem.clear_default_specs
@@ -1639,7 +1642,7 @@ class TestGem < Gem::TestCase
     spec = Gem::Specification.find { |s| s == spec }
     refute spec.activated?
 
-    open gem_deps_file, 'w' do |io|
+    File.open gem_deps_file, 'w' do |io|
       io.write 'gem "a"'
     end
 
@@ -1658,7 +1661,7 @@ class TestGem < Gem::TestCase
 
     refute spec.activated?
 
-    open 'gem.deps.rb', 'w' do |io|
+    File.open 'gem.deps.rb', 'w' do |io|
       io.write 'gem "a"'
     end
 
@@ -1702,7 +1705,7 @@ class TestGem < Gem::TestCase
 
     refute spec.activated?
 
-    open 'Gemfile', 'w' do |io|
+    File.open 'Gemfile', 'w' do |io|
       io.write 'gem "a"'
     end
 
@@ -1731,7 +1734,7 @@ class TestGem < Gem::TestCase
 
     refute spec.activated?
 
-    open 'gem.deps.rb', 'w' do |io|
+    File.open 'gem.deps.rb', 'w' do |io|
       io.write 'gem "a"'
     end
 
@@ -1746,7 +1749,7 @@ class TestGem < Gem::TestCase
     skip 'Insecure operation - read' if RUBY_VERSION <= "1.8.7"
     rubygems_gemdeps, ENV['RUBYGEMS_GEMDEPS'] = ENV['RUBYGEMS_GEMDEPS'], 'x'
 
-    open 'x', 'w' do |io|
+    File.open 'x', 'w' do |io|
       io.write 'gem "a"'
     end
 
@@ -1775,7 +1778,7 @@ You may need to `gem install -g` to install missing gems
     end
   ensure
     ENV['RUBYGEMS_GEMDEPS'] = rubygems_gemdeps
-  end
+  end if Gem::USE_BUNDLER_FOR_GEMDEPS
 
   def test_use_gemdeps_specific
     skip 'Insecure operation - read' if RUBY_VERSION <= "1.8.7"
@@ -1787,7 +1790,7 @@ You may need to `gem install -g` to install missing gems
     spec = Gem::Specification.find { |s| s == spec }
     refute spec.activated?
 
-    open 'x', 'w' do |io|
+    File.open 'x', 'w' do |io|
       io.write 'gem "a"'
     end
 

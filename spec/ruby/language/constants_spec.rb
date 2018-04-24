@@ -1,7 +1,7 @@
-require File.expand_path('../../spec_helper', __FILE__)
-require File.expand_path('../../fixtures/constants', __FILE__)
-require File.expand_path('../fixtures/constants_sclass', __FILE__)
-require File.expand_path('../fixtures/constant_visibility', __FILE__)
+require_relative '../spec_helper'
+require_relative '../fixtures/constants'
+require_relative 'fixtures/constants_sclass'
+require_relative 'fixtures/constant_visibility'
 
 # Read the documentation in fixtures/constants.rb for the guidelines and
 # rationale for the structure and organization of these specs.
@@ -422,6 +422,28 @@ describe "Constant resolution within a singleton class (class << obj)" do
       b = ConstantSpecs::CS_SINGLETON4_CLASSES[1].new
       [a.foo, b.foo].should == [1, 2]
     end
+  end
+end
+
+describe "top-level constant lookup" do
+  context "on a class" do
+    ruby_version_is "" ... "2.5" do
+      it "searches Object successfully after searching other scopes" do
+        ->() {
+          String::Hash.should == Hash
+        }.should complain(/toplevel constant Hash referenced by/)
+      end
+    end
+
+    ruby_version_is "2.5" do
+      it "does not search Object after searching other scopes" do
+        ->() { String::Hash }.should raise_error(NameError)
+      end
+    end
+  end
+
+  it "searches Object unsuccessfully when searches on a module" do
+    ->() { Enumerable::Hash }.should raise_error(NameError)
   end
 end
 

@@ -129,7 +129,9 @@ class TestEnv < Test::Unit::TestCase
     assert_equal("test", e.key)
     assert_equal("foo", ENV.fetch("test", "foo"))
     assert_equal("bar", ENV.fetch("test") { "bar" })
-    assert_equal("bar", ENV.fetch("test", "foo") { "bar" })
+    EnvUtil.suppress_warning do
+      assert_equal("bar", ENV.fetch("test", "foo") { "bar" })
+    end
     assert_invalid_env {|v| ENV.fetch(v)}
     assert_nothing_raised { ENV.fetch(PATH_ENV, "foo") }
     ENV[PATH_ENV] = ""
@@ -220,6 +222,18 @@ class TestEnv < Test::Unit::TestCase
     assert_nil(ENV.select! {|k, v| IGNORE_CASE ? k.upcase != "TEST" : k != "test" })
   end
 
+  def test_filter_bang
+    h1 = {}
+    ENV.each_pair {|k, v| h1[k] = v }
+    ENV["test"] = "foo"
+    ENV.filter! {|k, v| IGNORE_CASE ? k.upcase != "TEST" : k != "test" }
+    h2 = {}
+    ENV.each_pair {|k, v| h2[k] = v }
+    assert_equal(h1, h2)
+
+    assert_nil(ENV.filter! {|k, v| IGNORE_CASE ? k.upcase != "TEST" : k != "test" })
+  end
+
   def test_keep_if
     h1 = {}
     ENV.each_pair {|k, v| h1[k] = v }
@@ -250,6 +264,32 @@ class TestEnv < Test::Unit::TestCase
       assert_equal("test", k)
       assert_equal("foo", v)
     end
+  end
+
+  def test_filter
+    ENV["test"] = "foo"
+    h = ENV.filter {|k| IGNORE_CASE ? k.upcase == "TEST" : k == "test" }
+    assert_equal(1, h.size)
+    k = h.keys.first
+    v = h.values.first
+    if IGNORE_CASE
+      assert_equal("TEST", k.upcase)
+      assert_equal("FOO", v.upcase)
+    else
+      assert_equal("test", k)
+      assert_equal("foo", v)
+    end
+  end
+
+  def test_slice
+    ENV.clear
+    ENV["foo"] = "bar"
+    ENV["baz"] = "qux"
+    ENV["bar"] = "rab"
+    assert_equal({}, ENV.slice())
+    assert_equal({}, ENV.slice(""))
+    assert_equal({}, ENV.slice("unknown"))
+    assert_equal({"foo"=>"bar", "baz"=>"qux"}, ENV.slice("foo", "baz"))
   end
 
   def test_clear

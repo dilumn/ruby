@@ -195,3 +195,8 @@ lcov*.info
 # /win32/
 /win32/*.ico
 /win32/.time
+
+# MJIT
+/rb_mjit_header.h
+/mjit_config.h
+/include/ruby-*/*/rb_mjit_min_header-*.h

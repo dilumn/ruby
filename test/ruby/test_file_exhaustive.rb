@@ -651,11 +651,9 @@ class TestFileExhaustive < Test::Unit::TestCase
     return unless symlinkfile
     t = Time.local(2000)
     stat = File.lstat(symlinkfile)
-    assert_equal(File.utime(t, t, symlinkfile), 1)
-    assert_equal(File.stat(regular_file).atime, t)
-    assert_equal(File.stat(regular_file).mtime, t)
-    assert_equal(File.lstat(symlinkfile).atime, stat.atime)
-    assert_equal(File.lstat(symlinkfile).mtime, stat.mtime)
+    assert_equal(1, File.utime(t, t, symlinkfile))
+    assert_equal(t, File.stat(regular_file).atime)
+    assert_equal(t, File.stat(regular_file).mtime)
   end
 
   def test_lutime
@@ -893,6 +891,8 @@ class TestFileExhaustive < Test::Unit::TestCase
 
     assert_raise(ArgumentError) { File.expand_path(".", UnknownUserHome) }
     assert_nothing_raised(ArgumentError) { File.expand_path("#{DRIVE}/", UnknownUserHome) }
+    ENV["HOME"] = "#{DRIVE}UserHome"
+    assert_raise(ArgumentError) { File.expand_path("~") }
   ensure
     ENV["HOME"] = home
   end

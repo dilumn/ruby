@@ -615,14 +615,17 @@ class TestBignum < Test::Unit::TestCase
     start_flag = false
     end_flag = false
     num = (65536 ** 65536)
+    q = Queue.new
     thread = Thread.new do
-      start_flag = true
-      num.to_s
-      end_flag = true
+      assert_raise(RuntimeError) {
+        q << true
+        num.to_s
+        end_flag = true
+      }
     end
-    sleep 0.001 until start_flag
+    q.pop # sync
     thread.raise
-    thread.join rescue nil
+    thread.join
     time = Time.now - time
     skip "too fast cpu" if end_flag
     assert_operator(time, :<, 10)

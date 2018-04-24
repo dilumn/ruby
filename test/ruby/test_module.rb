@@ -462,9 +462,6 @@ class TestModule < Test::Unit::TestCase
     assert_equal([:cClass], (class << CClass; self; end).instance_methods(false))
     assert_equal([], (class << BClass; self; end).instance_methods(false))
     assert_equal([:cm2], (class << AClass; self; end).instance_methods(false))
-    # Ruby 1.8 feature change:
-    # #instance_methods includes protected methods.
-    #assert_equal([:aClass], AClass.instance_methods(false))
     assert_equal([:aClass, :aClass2], AClass.instance_methods(false).sort)
     assert_equal([:aClass, :aClass2],
         (AClass.instance_methods(true) - Object.instance_methods(true)).sort)
@@ -636,15 +633,15 @@ class TestModule < Test::Unit::TestCase
       def bar; end
     end
     m.freeze
-    assert_raise(RuntimeError) do
+    assert_raise(FrozenError) do
       m.module_eval do
         def foo; end
       end
     end
-    assert_raise(RuntimeError) do
+    assert_raise(FrozenError) do
       m.__send__ :private, :bar
     end
-    assert_raise(RuntimeError) do
+    assert_raise(FrozenError) do
       m.private_class_method :baz
     end
   end
@@ -949,7 +946,7 @@ class TestModule < Test::Unit::TestCase
   def test_frozen_module
     m = Module.new
     m.freeze
-    assert_raise(RuntimeError) do
+    assert_raise(FrozenError) do
       m.instance_eval { undef_method(:foo) }
     end
   end
@@ -957,7 +954,7 @@ class TestModule < Test::Unit::TestCase
   def test_frozen_class
     c = Class.new
     c.freeze
-    assert_raise(RuntimeError) do
+    assert_raise(FrozenError) do
       c.instance_eval { undef_method(:foo) }
     end
   end
@@ -967,7 +964,7 @@ class TestModule < Test::Unit::TestCase
     o = klass.new
     c = class << o; self; end
     c.freeze
-    assert_raise_with_message(RuntimeError, /frozen/) do
+    assert_raise_with_message(FrozenError, /frozen/) do
       c.instance_eval { undef_method(:foo) }
     end
     klass.class_eval do
@@ -1429,6 +1426,17 @@ class TestModule < Test::Unit::TestCase
     assert_warn(/deprecated/, bug12382) {c.class_eval "FOO"}
   end
 
+  NIL = nil
+  FALSE = false
+  deprecate_constant(:NIL, :FALSE)
+
+  def test_deprecate_nil_constant
+    w = EnvUtil.verbose_warning {2.times {FALSE}}
+    assert_equal(1, w.scan("::FALSE").size, w)
+    w = EnvUtil.verbose_warning {2.times {NIL}}
+    assert_equal(1, w.scan("::NIL").size, w)
+  end
+
   def test_constants_with_private_constant
     assert_not_include(::TestModule.constants, :PrivateClass)
     assert_not_include(::TestModule.constants(true), :PrivateClass)
@@ -1876,6 +1884,25 @@ class TestModule < Test::Unit::TestCase
     assert_raise(ArgumentError) { Module.new { prepend } }
   end
 
+  def test_prepend_private_super
+    wrapper = Module.new do
+      def wrapped
+        super + 1
+      end
+    end
+
+    klass = Class.new do
+      prepend wrapper
+
+      def wrapped
+        1
+      end
+      private :wrapped
+    end
+
+    assert_equal(2, klass.new.wrapped)
+  end
+
   def test_class_variables
     m = Module.new
     m.class_variable_set(:@@foo, 1)
@@ -2077,17 +2104,17 @@ class TestModule < Test::Unit::TestCase
     bug11532 = '[ruby-core:70828] [Bug #11532]'
 
     c = Class.new {const_set(:A, 1)}.freeze
-    assert_raise_with_message(RuntimeError, /frozen class/, bug11532) {
+    assert_raise_with_message(FrozenError, /frozen class/, bug11532) {
       c.class_eval {private_constant :A}
     }
 
     c = Class.new {const_set(:A, 1); private_constant :A}.freeze
-    assert_raise_with_message(RuntimeError, /frozen class/, bug11532) {
+    assert_raise_with_message(FrozenError, /frozen class/, bug11532) {
       c.class_eval {public_constant :A}
     }
 
     c = Class.new {const_set(:A, 1)}.freeze
-    assert_raise_with_message(RuntimeError, /frozen class/, bug11532) {
+    assert_raise_with_message(FrozenError, /frozen class/, bug11532) {
       c.class_eval {deprecate_constant :A}
     }
   end

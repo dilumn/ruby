@@ -11,18 +11,21 @@
 
 **********************************************************************/
 
-#include "internal.h"
+#include "ruby/encoding.h"
 #include "ruby/re.h"
+#include "internal.h"
 #include "encindex.h"
 #include "probes.h"
 #include "gc.h"
 #include "ruby_assert.h"
 #include "id.h"
 #include "debug_counter.h"
+#include "ruby/util.h"
 
 #define BEG(no) (regs->beg[(no)])
 #define END(no) (regs->end[(no)])
 
+#include <errno.h>
 #include <math.h>
 #include <ctype.h>
 
@@ -370,7 +373,7 @@ rb_setup_fake_str(struct RString *fake_str, const char *name, long len, rb_encod
     return setup_fake_str(fake_str, name, len, rb_enc_to_index(enc));
 }
 
-VALUE
+MJIT_FUNC_EXPORTED VALUE
 rb_fstring_new(const char *ptr, long len)
 {
     struct RString fake_str;
@@ -439,10 +442,23 @@ static inline const char *
 search_nonascii(const char *p, const char *e)
 {
     const uintptr_t *s, *t;
-#if SIZEOF_VOIDP == 8
-# define NONASCII_MASK 0x8080808080808080ULL
-#elif SIZEOF_VOIDP == 4
-# define NONASCII_MASK 0x80808080UL
+
+#if defined(__STDC_VERSION) && (__STDC_VERSION__ >= 199901L)
+# if SIZEOF_UINTPTR_T == 8
+#  define NONASCII_MASK UINT64_C(0x8080808080808080)
+# elif SIZEOF_UINTPTR_T == 4
+#  define NONASCII_MASK UINT32_C(0x80808080)
+# else
+#  error "don't know what to do."
+# endif
+#else
+# if SIZEOF_UINTPTR_T == 8
+#  define NONASCII_MASK ((uintptr_t)0x80808080UL << 32 | (uintptr_t)0x80808080UL)
+# elif SIZEOF_UINTPTR_T == 4
+#  define NONASCII_MASK 0x80808080UL /* or...? */
+# else
+#  error "don't know what to do."
+# endif
 #endif
 
     if (UNALIGNED_WORD_ACCESS || e - p >= SIZEOF_VOIDP) {
@@ -465,8 +481,15 @@ search_nonascii(const char *p, const char *e)
 	    }
 	}
 #endif
-	s = (const uintptr_t *)p;
-	t = (const uintptr_t *)(e - (SIZEOF_VOIDP-1));
+#ifdef HAVE_BUILTIN___BUILTIN_ASSUME_ALIGNED
+#define aligned_ptr(value) \
+        __builtin_assume_aligned((value), sizeof(uintptr_t))
+#else
+#define aligned_ptr(value) (uintptr_t *)(value)
+#endif
+	s = aligned_ptr(p);
+	t = aligned_ptr(e - (SIZEOF_VOIDP-1));
+#undef aligned_ptr
 	for (;s < t; s++) {
 	    if (*s & NONASCII_MASK) {
 #ifdef WORDS_BIGENDIAN
@@ -1422,7 +1445,7 @@ rb_obj_as_string(VALUE obj)
     return rb_obj_as_string_result(str, obj);
 }
 
-VALUE
+MJIT_FUNC_EXPORTED VALUE
 rb_obj_as_string_result(VALUE str, VALUE obj)
 {
     if (!RB_TYPE_P(str, T_STRING))
@@ -1965,7 +1988,7 @@ rb_str_times(VALUE str, VALUE times)
  *  details of the format string.
  *
  *     "%05d" % 123                              #=> "00123"
- *     "%-5s: %08x" % [ "ID", self.object_id ]   #=> "ID   : 200e14d6"
+ *     "%-5s: %016x" % [ "ID", self.object_id ]  #=> "ID   : 00002b054ec93168"
  *     "foo = %{foo}" % { :foo => 'bar' }        #=> "foo = bar"
  */
 
@@ -2537,6 +2560,7 @@ str_substr(VALUE str, long beg, long len, int empty)
 	str2 = str_new_shared(rb_obj_class(str2), str2);
 	RSTRING(str2)->as.heap.ptr += ofs;
 	RSTRING(str2)->as.heap.len = len;
+	ENC_CODERANGE_CLEAR(str2);
     }
     else {
 	if (!len && !empty) return Qnil;
@@ -2909,7 +2933,7 @@ rb_str_append(VALUE str, VALUE str2)
 
 #define MIN_PRE_ALLOC_SIZE 48
 
-VALUE
+MJIT_FUNC_EXPORTED VALUE
 rb_str_concat_literals(size_t num, const VALUE *strary)
 {
     VALUE str;
@@ -3239,7 +3263,7 @@ rb_str_equal(VALUE str1, VALUE str2)
  * Two strings are equal if they have the same length and content.
  */
 
-VALUE
+MJIT_FUNC_EXPORTED VALUE
 rb_str_eql(VALUE str1, VALUE str2)
 {
     if (str1 == str2) return Qtrue;
@@ -3422,13 +3446,34 @@ str_casecmp_p(VALUE str1, VALUE str2)
     return rb_str_eql(folded_str1, folded_str2);
 }
 
+static long
+strseq_core(const char *str_ptr, const char *str_ptr_end, long str_len,
+	    const char *sub_ptr, long sub_len, long offset, rb_encoding *enc)
+{
+    const char *search_start = str_ptr;
+    long pos, search_len = str_len - offset;
+
+    for (;;) {
+	const char *t;
+	pos = rb_memsearch(sub_ptr, sub_len, search_start, search_len, enc);
+	if (pos < 0) return pos;
+	t = rb_enc_right_char_head(search_start, search_start+pos, str_ptr_end, enc);
+	if (t == search_start + pos) break;
+	search_len -= t - search_start;
+	if (search_len <= 0) return -1;
+	offset += t - search_start;
+	search_start = t;
+    }
+    return pos + offset;
+}
+
 #define rb_str_index(str, sub, offset) rb_strseq_index(str, sub, offset, 0)
 
 static long
 rb_strseq_index(VALUE str, VALUE sub, long offset, int in_byte)
 {
-    const char *str_ptr, *str_ptr_end, *sub_ptr, *search_start;
-    long pos, str_len, sub_len, search_len;
+    const char *str_ptr, *str_ptr_end, *sub_ptr;
+    long str_len, sub_len;
     int single_byte = single_byte_optimizable(str);
     rb_encoding *enc;
 
@@ -3458,21 +3503,7 @@ rb_strseq_index(VALUE str, VALUE sub, long offset, int in_byte)
     if (sub_len == 0) return offset;
 
     /* need proceed one character at a time */
-
-    search_start = str_ptr;
-    search_len = RSTRING_LEN(str) - offset;
-    for (;;) {
-	const char *t;
-	pos = rb_memsearch(sub_ptr, sub_len, search_start, search_len, enc);
-	if (pos < 0) return pos;
-	t = rb_enc_right_char_head(search_start, search_start+pos, str_ptr_end, enc);
-	if (t == search_start + pos) break;
-	search_len -= t - search_start;
-	if (search_len <= 0) return -1;
-	offset += t - search_start;
-	search_start = t;
-    }
-    return pos + offset;
+    return strseq_core(str_ptr, str_ptr_end, str_len, sub_ptr, sub_len, offset, enc);
 }
 
 
@@ -4288,6 +4319,50 @@ str_upto_each(VALUE beg, VALUE end, int excl, int (*each)(VALUE, VALUE), VALUE a
 	StringValue(current);
 	if (excl && rb_str_equal(current, end)) break;
 	if (RSTRING_LEN(current) > RSTRING_LEN(end) || RSTRING_LEN(current) == 0)
+	    break;
+    }
+
+    return beg;
+}
+
+VALUE
+rb_str_upto_endless_each(VALUE beg, VALUE (*each)(VALUE, VALUE), VALUE arg)
+{
+    VALUE current;
+    ID succ;
+
+    CONST_ID(succ, "succ");
+    /* both edges are all digits */
+    if (is_ascii_string(beg) && ISDIGIT(RSTRING_PTR(beg)[0]) &&
+	all_digits_p(RSTRING_PTR(beg), RSTRING_LEN(beg))) {
+	VALUE b, args[2], fmt = rb_fstring_cstr("%.*d");
+	int width = RSTRING_LENINT(beg);
+	b = rb_str_to_inum(beg, 10, FALSE);
+	if (FIXNUM_P(b)) {
+	    long bi = FIX2LONG(b);
+	    rb_encoding *usascii = rb_usascii_encoding();
+
+	    while (FIXABLE(bi)) {
+		(*each)(rb_enc_sprintf(usascii, "%.*ld", width, bi), arg);
+		bi++;
+	    }
+	    b = LONG2NUM(bi);
+	}
+	args[0] = INT2FIX(width);
+	while (1) {
+	    args[1] = b;
+	    (*each)(rb_str_format(numberof(args), args, fmt), arg);
+	    b = rb_funcallv(b, succ, 0, 0);
+	}
+    }
+    /* normal case */
+    current = rb_str_dup(beg);
+    while (1) {
+	VALUE next = rb_funcallv(current, succ, 0, 0);
+	(*each)(current, arg);
+	current = next;
+	StringValue(current);
+	if (RSTRING_LEN(current) == 0)
 	    break;
     }
 
@@ -5935,7 +6010,7 @@ rb_str_dump(VALUE str)
     char *q, *qend;
     VALUE result;
     int u8 = (encidx == rb_utf8_encindex());
-    static const char nonascii_suffix[] = ".force_encoding(\"%s\")";
+    static const char nonascii_suffix[] = ".dup.force_encoding(\"%s\")";
 
     len = 2;			/* "" */
     if (!rb_enc_asciicompat(enc)) {
@@ -6073,6 +6148,239 @@ rb_str_dump(VALUE str)
     return result;
 }
 
+static int
+unescape_ascii(unsigned int c)
+{
+    switch (c) {
+      case 'n':
+	return '\n';
+      case 'r':
+	return '\r';
+      case 't':
+	return '\t';
+      case 'f':
+	return '\f';
+      case 'v':
+	return '\13';
+      case 'b':
+	return '\010';
+      case 'a':
+	return '\007';
+      case 'e':
+	return 033;
+      default:
+	UNREACHABLE;
+    }
+}
+
+static void
+undump_after_backslash(VALUE undumped, const char **ss, const char *s_end, rb_encoding **penc, bool *utf8, bool *binary)
+{
+    const char *s = *ss;
+    unsigned int c;
+    int codelen;
+    size_t hexlen;
+    char buf[6];
+    static rb_encoding *enc_utf8 = NULL;
+
+    switch (*s) {
+      case '\\':
+      case '"':
+      case '#':
+	rb_str_cat(undumped, s, 1); /* cat itself */
+	s++;
+	break;
+      case 'n':
+      case 'r':
+      case 't':
+      case 'f':
+      case 'v':
+      case 'b':
+      case 'a':
+      case 'e':
+	*buf = (char)unescape_ascii(*s);
+	rb_str_cat(undumped, buf, 1);
+	s++;
+	break;
+      case 'u':
+	if (*binary) {
+	    rb_raise(rb_eRuntimeError, "hex escape and Unicode escape are mixed");
+	}
+	*utf8 = true;
+	if (++s >= s_end) {
+	    rb_raise(rb_eRuntimeError, "invalid Unicode escape");
+	}
+	if (enc_utf8 == NULL) enc_utf8 = rb_utf8_encoding();
+	if (*penc != enc_utf8) {
+	    *penc = enc_utf8;
+	    rb_enc_associate(undumped, enc_utf8);
+	}
+	if (*s == '{') { /* handle \u{...} form */
+	    s++;
+	    for (;;) {
+		if (s >= s_end) {
+		    rb_raise(rb_eRuntimeError, "unterminated Unicode escape");
+		}
+		if (*s == '}') {
+		    s++;
+		    break;
+		}
+		if (ISSPACE(*s)) {
+		    s++;
+		    continue;
+		}
+		c = scan_hex(s, s_end-s, &hexlen);
+		if (hexlen == 0 || hexlen > 6) {
+		    rb_raise(rb_eRuntimeError, "invalid Unicode escape");
+		}
+		if (c > 0x10ffff) {
+		    rb_raise(rb_eRuntimeError, "invalid Unicode codepoint (too large)");
+		}
+		if (0xd800 <= c && c <= 0xdfff) {
+		    rb_raise(rb_eRuntimeError, "invalid Unicode codepoint");
+		}
+		codelen = rb_enc_mbcput(c, buf, *penc);
+		rb_str_cat(undumped, buf, codelen);
+		s += hexlen;
+	    }
+	}
+	else { /* handle \uXXXX form */
+	    c = scan_hex(s, 4, &hexlen);
+	    if (hexlen != 4) {
+		rb_raise(rb_eRuntimeError, "invalid Unicode escape");
+	    }
+	    if (0xd800 <= c && c <= 0xdfff) {
+		rb_raise(rb_eRuntimeError, "invalid Unicode codepoint");
+	    }
+	    codelen = rb_enc_mbcput(c, buf, *penc);
+	    rb_str_cat(undumped, buf, codelen);
+	    s += hexlen;
+	}
+	break;
+      case 'x':
+	if (*utf8) {
+	    rb_raise(rb_eRuntimeError, "hex escape and Unicode escape are mixed");
+	}
+	*binary = true;
+	if (++s >= s_end) {
+	    rb_raise(rb_eRuntimeError, "invalid hex escape");
+	}
+	*buf = scan_hex(s, 2, &hexlen);
+	if (hexlen != 2) {
+	    rb_raise(rb_eRuntimeError, "invalid hex escape");
+	}
+	rb_str_cat(undumped, buf, 1);
+	s += hexlen;
+	break;
+      default:
+	rb_str_cat(undumped, s-1, 2);
+	s++;
+    }
+
+    *ss = s;
+}
+
+static VALUE rb_str_is_ascii_only_p(VALUE str);
+
+/*
+ *  call-seq:
+ *     str.undump   -> new_str
+ *
+ *  Produces unescaped version of +str+.
+ *  See also String#dump because String#undump does inverse of String#dump.
+ *
+ *    "\"hello \\n ''\"".undump #=> "hello \n ''"
+ */
+
+static VALUE
+str_undump(VALUE str)
+{
+    const char *s = RSTRING_PTR(str);
+    const char *s_end = RSTRING_END(str);
+    rb_encoding *enc = rb_enc_get(str);
+    VALUE undumped = rb_enc_str_new(s, 0L, enc);
+    bool utf8 = false;
+    bool binary = false;
+    int w;
+
+    rb_must_asciicompat(str);
+    if (rb_str_is_ascii_only_p(str) == Qfalse) {
+	rb_raise(rb_eRuntimeError, "non-ASCII character detected");
+    }
+    if (!str_null_check(str, &w)) {
+       rb_raise(rb_eRuntimeError, "string contains null byte");
+    }
+    if (RSTRING_LEN(str) < 2) goto invalid_format;
+    if (*s != '"') goto invalid_format;
+
+    /* strip '"' at the start */
+    s++;
+
+    for (;;) {
+	if (s >= s_end) {
+	    rb_raise(rb_eRuntimeError, "unterminated dumped string");
+	}
+
+	if (*s == '"') {
+	    /* epilogue */
+	    s++;
+	    if (s == s_end) {
+		/* ascii compatible dumped string */
+		break;
+	    }
+	    else {
+		static const char force_encoding_suffix[] = ".force_encoding(\""; /* "\")" */
+		static const char dup_suffix[] = ".dup";
+		const char *encname;
+		int encidx;
+		ptrdiff_t size;
+
+		/* check separately for strings dumped by older versions */
+		size = sizeof(dup_suffix) - 1;
+		if (s_end - s > size && memcmp(s, dup_suffix, size) == 0) s += size;
+
+		size = sizeof(force_encoding_suffix) - 1;
+		if (s_end - s <= size) goto invalid_format;
+		if (memcmp(s, force_encoding_suffix, size) != 0) goto invalid_format;
+		s += size;
+
+		if (utf8) {
+		    rb_raise(rb_eRuntimeError, "dumped string contained Unicode escape but used force_encoding");
+		}
+
+		encname = s;
+		s = memchr(s, '"', s_end-s);
+		size = s - encname;
+		if (!s) goto invalid_format;
+		if (s_end - s != 2) goto invalid_format;
+		if (s[0] != '"' || s[1] != ')') goto invalid_format;
+
+		encidx = rb_enc_find_index2(encname, (long)size);
+		if (encidx < 0) {
+		    rb_raise(rb_eRuntimeError, "dumped string has unknown encoding name");
+		}
+		rb_enc_associate_index(undumped, encidx);
+	    }
+	    break;
+	}
+
+	if (*s == '\\') {
+	    s++;
+	    if (s >= s_end) {
+		rb_raise(rb_eRuntimeError, "invalid escape");
+	    }
+	    undump_after_backslash(undumped, &s, s_end, &enc, &utf8, &binary);
+	}
+	else {
+	    rb_str_cat(undumped, s++, 1);
+	}
+    }
+
+    OBJ_INFECT(undumped, str);
+    return undumped;
+invalid_format:
+    rb_raise(rb_eRuntimeError, "invalid dumped string; not wrapped with '\"' nor '\"...\".force_encoding(\"...\")' form");
+}
 
 static void
 rb_str_check_dummy_enc(rb_encoding *enc)
@@ -6134,7 +6442,7 @@ typedef struct mapping_buffer {
     size_t capa;
     size_t used;
     struct mapping_buffer *next;
-    OnigUChar space[1];
+    OnigUChar space[FLEX_ARY_LEN];
 } mapping_buffer;
 
 static VALUE
@@ -6373,7 +6681,7 @@ rb_str_downcase_bang(int argc, VALUE *argv, VALUE str)
  *    This option cannot be combined with any other option.
  *  :turkic ::
  *    Full Unicode case mapping, adapted for Turkic languages
- *    (Turkish, Aserbaijani,...). This means that upper case I is mapped to
+ *    (Turkish, Azerbaijani,...). This means that upper case I is mapped to
  *    lower case dotless i, and so on.
  *  :lithuanian ::
  *    Currently, just full Unicode case mapping. In the future, full Unicode
@@ -6383,7 +6691,7 @@ rb_str_downcase_bang(int argc, VALUE *argv, VALUE str)
  *    Only available on +downcase+ and +downcase!+. Unicode case <b>folding</b>,
  *    which is more far-reaching than Unicode case mapping.
  *    This option currently cannot be combined with any other option
- *    (i.e. there is currenty no variant for turkic languages).
+ *    (i.e. there is currently no variant for turkic languages).
  *
  *  Please note that several assumptions that are valid for ASCII-only case
  *  conversions do not hold for more general case conversions. For example,
@@ -7344,17 +7652,47 @@ static const char isspacetable[256] = {
 
 #define ascii_isspace(c) isspacetable[(unsigned char)(c)]
 
+static long
+split_string(VALUE result, VALUE str, long beg, long len, long empty_count)
+{
+    if (empty_count >= 0 && len == 0) {
+	return empty_count + 1;
+    }
+    if (empty_count > 0) {
+	/* make different substrings */
+	if (result) {
+	    do {
+		rb_ary_push(result, str_new_empty(str));
+	    } while (--empty_count > 0);
+	}
+	else {
+	    do {
+		rb_yield(str_new_empty(str));
+	    } while (--empty_count > 0);
+	}
+    }
+    str = rb_str_subseq(str, beg, len);
+    if (result) {
+	rb_ary_push(result, str);
+    }
+    else {
+	rb_yield(str);
+    }
+    return empty_count;
+}
+
 /*
  *  call-seq:
- *     str.split(pattern=nil, [limit])   -> an_array
+ *     str.split(pattern=nil, [limit])                -> an_array
+ *     str.split(pattern=nil, [limit]) {|sub| block } -> str
  *
  *  Divides <i>str</i> into substrings based on a delimiter, returning an array
  *  of these substrings.
  *
  *  If <i>pattern</i> is a <code>String</code>, then its contents are used as
  *  the delimiter when splitting <i>str</i>. If <i>pattern</i> is a single
- *  space, <i>str</i> is split on whitespace, with leading whitespace and runs
- *  of contiguous whitespace characters ignored.
+ *  space, <i>str</i> is split on whitespace, with leading and trailing
+ *  whitespace and runs of contiguous whitespace characters ignored.
  *
  *  If <i>pattern</i> is a <code>Regexp</code>, <i>str</i> is divided where the
  *  pattern matches. Whenever the pattern matches a zero-length string,
@@ -7377,8 +7715,8 @@ static const char isspacetable[256] = {
  *  When the input +str+ is empty an empty Array is returned as the string is
  *  considered to have no fields to split.
  *
- *     " now's  the time".split        #=> ["now's", "the", "time"]
- *     " now's  the time".split(' ')   #=> ["now's", "the", "time"]
+ *     " now's  the time ".split       #=> ["now's", "the", "time"]
+ *     " now's  the time ".split(' ')  #=> ["now's", "the", "time"]
  *     " now's  the time".split(/ /)   #=> ["", "now's", "", "the", "time"]
  *     "1, 2.34,56, 7".split(%r{,\s*}) #=> ["1", "2.34", "56", "7"]
  *     "hello".split(//)               #=> ["h", "e", "l", "l", "o"]
@@ -7393,6 +7731,9 @@ static const char isspacetable[256] = {
  *     "1:2:3".split(/(:)()()/, 2)     #=> ["1", ":", "", "", "2:3"]
  *
  *     "".split(',', -1)               #=> []
+ *
+ *  If a block is given, invoke the block with each split substring.
+ *
  */
 
 static VALUE
@@ -7402,20 +7743,27 @@ rb_str_split_m(int argc, VALUE *argv, VALUE str)
     VALUE spat;
     VALUE limit;
     enum {awk, string, regexp} split_type;
-    long beg, end, i = 0;
+    long beg, end, i = 0, empty_count = -1;
     int lim = 0;
     VALUE result, tmp;
 
+    result = rb_block_given_p() ? Qfalse : Qnil;
     if (rb_scan_args(argc, argv, "02", &spat, &limit) == 2) {
 	lim = NUM2INT(limit);
 	if (lim <= 0) limit = Qnil;
 	else if (lim == 1) {
 	    if (RSTRING_LEN(str) == 0)
-		return rb_ary_new2(0);
-	    return rb_ary_new3(1, rb_str_dup(str));
+		return result ? rb_ary_new2(0) : str;
+	    tmp = rb_str_dup(str);
+	    if (!result) {
+		rb_yield(tmp);
+		return str;
+	    }
+	    return rb_ary_new3(1, tmp);
 	}
 	i = 1;
     }
+    if (NIL_P(limit) && !lim) empty_count = 0;
 
     enc = STR_ENC_GET(str);
     split_type = regexp;
@@ -7454,7 +7802,9 @@ rb_str_split_m(int argc, VALUE *argv, VALUE str)
 	}
     }
 
-    result = rb_ary_new();
+#define SPLIT_STR(beg, len) (empty_count = split_string(result, str, beg, len, empty_count))
+
+    if (result) result = rb_ary_new();
     beg = 0;
     if (split_type == awk) {
 	char *ptr = RSTRING_PTR(str);
@@ -7478,7 +7828,7 @@ rb_str_split_m(int argc, VALUE *argv, VALUE str)
 		    }
 		}
 		else if (ascii_isspace(c)) {
-		    rb_ary_push(result, rb_str_subseq(str, beg, end-beg));
+		    SPLIT_STR(beg, end-beg);
 		    skip = 1;
 		    beg = ptr - bptr;
 		    if (!NIL_P(limit)) ++i;
@@ -7505,7 +7855,7 @@ rb_str_split_m(int argc, VALUE *argv, VALUE str)
 		    }
 		}
 		else if (rb_isspace(c)) {
-		    rb_ary_push(result, rb_str_subseq(str, beg, end-beg));
+		    SPLIT_STR(beg, end-beg);
 		    skip = 1;
 		    beg = ptr - bptr;
 		    if (!NIL_P(limit)) ++i;
@@ -7534,8 +7884,7 @@ rb_str_split_m(int argc, VALUE *argv, VALUE str)
 		ptr = t;
 		continue;
 	    }
-	    rb_ary_push(result, rb_str_subseq(str, substr_start - str_start,
-					      (ptr+end) - substr_start));
+	    SPLIT_STR(substr_start - str_start, (ptr+end) - substr_start);
 	    ptr += end + slen;
 	    substr_start = ptr;
 	    if (!NIL_P(limit) && lim <= ++i) break;
@@ -7554,14 +7903,11 @@ rb_str_split_m(int argc, VALUE *argv, VALUE str)
 	    regs = RMATCH_REGS(rb_backref_get());
 	    if (start == end && BEG(0) == END(0)) {
 		if (!ptr) {
-		    rb_ary_push(result, str_new_empty(str));
+		    SPLIT_STR(0, 0);
 		    break;
 		}
 		else if (last_null == 1) {
-		    rb_ary_push(result, rb_str_subseq(str, beg,
-						      rb_enc_fast_mbclen(ptr+beg,
-									 ptr+len,
-									 enc)));
+		    SPLIT_STR(beg, rb_enc_fast_mbclen(ptr+beg, ptr+len, enc));
 		    beg = start;
 		}
 		else {
@@ -7574,37 +7920,23 @@ rb_str_split_m(int argc, VALUE *argv, VALUE str)
 		}
 	    }
 	    else {
-		rb_ary_push(result, rb_str_subseq(str, beg, end-beg));
+		SPLIT_STR(beg, end-beg);
 		beg = start = END(0);
 	    }
 	    last_null = 0;
 
 	    for (idx=1; idx < regs->num_regs; idx++) {
 		if (BEG(idx) == -1) continue;
-		if (BEG(idx) == END(idx))
-		    tmp = str_new_empty(str);
-		else
-		    tmp = rb_str_subseq(str, BEG(idx), END(idx)-BEG(idx));
-		rb_ary_push(result, tmp);
+		SPLIT_STR(BEG(idx), END(idx)-BEG(idx));
 	    }
 	    if (!NIL_P(limit) && lim <= ++i) break;
 	}
     }
     if (RSTRING_LEN(str) > 0 && (!NIL_P(limit) || RSTRING_LEN(str) > beg || lim < 0)) {
-	if (RSTRING_LEN(str) == beg)
-	    tmp = str_new_empty(str);
-	else
-	    tmp = rb_str_subseq(str, beg, RSTRING_LEN(str)-beg);
-	rb_ary_push(result, tmp);
-    }
-    if (NIL_P(limit) && lim == 0) {
-	long len;
-	while ((len = RARRAY_LEN(result)) > 0 &&
-	       (tmp = RARRAY_AREF(result, len-1), RSTRING_LEN(tmp) == 0))
-	    rb_ary_pop(result);
+	SPLIT_STR(beg, RSTRING_LEN(str)-beg);
     }
 
-    return result;
+    return result ? result : str;
 }
 
 VALUE
@@ -7777,7 +8109,13 @@ rb_str_enumerate_lines(int argc, VALUE *argv, VALUE str, VALUE ary)
 
     if (subptr != pend) {
 	if (chomp) {
-	    pend = chomp_newline(subptr, pend, enc);
+	    if (rsnewline) {
+		pend = chomp_newline(subptr, pend, enc);
+	    }
+	    else if (pend - subptr >= rslen &&
+		     memcmp(pend - rslen, rsptr, rslen) == 0) {
+		pend -= rslen;
+	    }
 	}
 	line = rb_str_subseq(str, subptr - ptr, pend - subptr);
 	ENUM_ELEM(ary, line);
@@ -8067,20 +8405,12 @@ rb_str_codepoints(VALUE str)
     return rb_str_enumerate_codepoints(str, ary);
 }
 
-static VALUE
-rb_str_enumerate_grapheme_clusters(VALUE str, VALUE ary)
+static regex_t *
+get_reg_grapheme_cluster(rb_encoding *enc)
 {
-    VALUE orig = str;
+    int encidx = rb_enc_to_index(enc);
     regex_t *reg_grapheme_cluster = NULL;
     static regex_t *reg_grapheme_cluster_utf8 = NULL;
-    int encidx = ENCODING_GET(str);
-    rb_encoding *enc = rb_enc_from_index(encidx);
-    int unicode_p = rb_enc_unicode_p(enc);
-    const char *ptr, *end;
-
-    if (!unicode_p || single_byte_optimizable(str)) {
-	return rb_str_enumerate_chars(str, ary);
-    }
 
     /* synchronize */
     if (encidx == rb_utf8_encindex() && reg_grapheme_cluster_utf8) {
@@ -8097,8 +8427,22 @@ rb_str_enumerate_grapheme_clusters(VALUE str, VALUE ary)
 	    reg_grapheme_cluster_utf8 = reg_grapheme_cluster;
 	}
     }
+    return reg_grapheme_cluster;
+}
 
-    if (!ary) str = rb_str_new_frozen(str);
+static VALUE
+rb_str_each_grapheme_cluster_size(VALUE str, VALUE args, VALUE eobj)
+{
+    size_t grapheme_cluster_count = 0;
+    regex_t *reg_grapheme_cluster = NULL;
+    rb_encoding *enc = rb_enc_from_index(ENCODING_GET(str));
+    const char *ptr, *end;
+
+    if (!rb_enc_unicode_p(enc) || single_byte_optimizable(str)) {
+	return rb_str_length(str);
+    }
+
+    reg_grapheme_cluster = get_reg_grapheme_cluster(enc);
     ptr = RSTRING_PTR(str);
     end = RSTRING_END(str);
 
@@ -8106,10 +8450,36 @@ rb_str_enumerate_grapheme_clusters(VALUE str, VALUE ary)
 	OnigPosition len = onig_match(reg_grapheme_cluster,
 				      (const OnigUChar *)ptr, (const OnigUChar *)end,
 				      (const OnigUChar *)ptr, NULL, 0);
-	if (len == 0) break;
-	if (len < 0) {
-	    break;
-	}
+	if (len <= 0) break;
+	grapheme_cluster_count++;
+	ptr += len;
+    }
+
+    return SIZET2NUM(grapheme_cluster_count);
+}
+
+static VALUE
+rb_str_enumerate_grapheme_clusters(VALUE str, VALUE ary)
+{
+    VALUE orig = str;
+    regex_t *reg_grapheme_cluster = NULL;
+    rb_encoding *enc = rb_enc_from_index(ENCODING_GET(str));
+    const char *ptr, *end;
+
+    if (!rb_enc_unicode_p(enc) || single_byte_optimizable(str)) {
+	return rb_str_enumerate_chars(str, ary);
+    }
+
+    if (!ary) str = rb_str_new_frozen(str);
+    reg_grapheme_cluster = get_reg_grapheme_cluster(enc);
+    ptr = RSTRING_PTR(str);
+    end = RSTRING_END(str);
+
+    while (ptr < end) {
+	OnigPosition len = onig_match(reg_grapheme_cluster,
+				      (const OnigUChar *)ptr, (const OnigUChar *)end,
+				      (const OnigUChar *)ptr, NULL, 0);
+	if (len <= 0) break;
 	ENUM_ELEM(ary, rb_enc_str_new(ptr, len, enc));
 	ptr += len;
     }
@@ -8138,7 +8508,7 @@ rb_str_enumerate_grapheme_clusters(VALUE str, VALUE ary)
 static VALUE
 rb_str_each_grapheme_cluster(VALUE str)
 {
-    RETURN_SIZED_ENUMERATOR(str, 0, 0, rb_str_each_char_size);
+    RETURN_SIZED_ENUMERATOR(str, 0, 0, rb_str_each_grapheme_cluster_size);
     return rb_str_enumerate_grapheme_clusters(str, 0);
 }
 
@@ -10100,7 +10470,7 @@ rb_str_symname_p(VALUE sym)
     ptr = RSTRING_PTR(sym);
     len = RSTRING_LEN(sym);
     if ((resenc != enc && !rb_str_is_ascii_only_p(sym)) || len != (long)strlen(ptr) ||
-	!rb_enc_symname_p(ptr, enc) || !sym_printable(ptr, ptr + len, enc)) {
+	!rb_enc_symname2_p(ptr, len, enc) || !sym_printable(ptr, ptr + len, enc)) {
 	return FALSE;
     }
     return TRUE;
@@ -10127,10 +10497,14 @@ rb_str_quote_unprintable(VALUE str)
     return str;
 }
 
-VALUE
+MJIT_FUNC_EXPORTED VALUE
 rb_id_quote_unprintable(ID id)
 {
-    return rb_str_quote_unprintable(rb_id2str(id));
+    VALUE str = rb_id2str(id);
+    if (!rb_str_symname_p(str)) {
+	return rb_str_inspect(str);
+    }
+    return str;
 }
 
 /*
@@ -10204,7 +10578,7 @@ sym_to_sym(VALUE sym)
     return sym;
 }
 
-VALUE
+MJIT_FUNC_EXPORTED VALUE
 rb_sym_proc_call(ID mid, int argc, const VALUE *argv, VALUE passed_proc)
 {
     VALUE obj;
@@ -10221,7 +10595,7 @@ rb_sym_proc_call(ID mid, int argc, const VALUE *argv, VALUE passed_proc)
  * call-seq:
  *   sym.to_proc
  *
- * Returns a _Proc_ object which respond to the given method by _sym_.
+ * Returns a _Proc_ object which responds to the given method by _sym_.
  *
  *   (1..3).collect(&:to_s)  #=> ["1", "2", "3"]
  */
@@ -10586,6 +10960,7 @@ Init_String(void)
     rb_define_method(rb_cString, "to_str", rb_str_to_s, 0);
     rb_define_method(rb_cString, "inspect", rb_str_inspect, 0);
     rb_define_method(rb_cString, "dump", rb_str_dump, 0);
+    rb_define_method(rb_cString, "undump", str_undump, 0);
 
     sym_ascii      = ID2SYM(rb_intern("ascii"));
     sym_turkic     = ID2SYM(rb_intern("turkic"));

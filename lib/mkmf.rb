@@ -129,7 +129,6 @@ module MakeMakefile
   $vendorarchdir = CONFIG["vendorarchdir"]
 
   $mswin = /mswin/ =~ RUBY_PLATFORM
-  $bccwin = /bccwin/ =~ RUBY_PLATFORM
   $mingw = /mingw/ =~ RUBY_PLATFORM
   $cygwin = /cygwin/ =~ RUBY_PLATFORM
   $netbsd = /netbsd/ =~ RUBY_PLATFORM
@@ -242,7 +241,12 @@ module MakeMakefile
     $topdir ||= RbConfig::CONFIG["topdir"]
     $arch_hdrdir = "$(extout)/include/$(arch)"
   else
-    abort "mkmf.rb can't find header files for ruby at #{$hdrdir}/ruby.h"
+    abort <<MESSAGE
+mkmf.rb can't find header files for ruby at #{$hdrdir}/ruby.h
+
+You might have to install separate package for the ruby development
+environment, ruby-dev or ruby-devel for example.
+MESSAGE
   end
 
   CONFTEST = "conftest".freeze
@@ -658,7 +662,8 @@ MSG
   end
 
   def try_ldflags(flags, opts = {})
-    try_link(MAIN_DOES_NOTHING, flags, {:werror => true}.update(opts))
+    opts = {:werror => true}.update(opts) if $mswin
+    try_link(MAIN_DOES_NOTHING, flags, opts)
   end
 
   def append_ldflags(flags, *opts)
@@ -2124,7 +2129,10 @@ RULES
     unless suffixes.empty?
       depout.unshift(".SUFFIXES: ." + suffixes.uniq.join(" .") + "\n\n")
     end
-    depout.unshift("$(OBJS): $(RUBY_EXTCONF_H)\n\n") if $extconf_h
+    if $extconf_h
+      depout.unshift("$(OBJS): $(RUBY_EXTCONF_H)\n\n")
+      depout.unshift("$(OBJS): $(hdrdir)/ruby/win32.h\n\n") if $mswin or $mingw
+    end
     depout.flatten!
     depout
   end
@@ -2582,7 +2590,8 @@ MESSAGE
       src = src.sub(/\{/) do
         $& +
           "\n  if (argc > 1000000) {\n" +
-          refs.map {|n|"    printf(\"%p\", &#{n});\n"}.join("") +
+          refs.map {|n|"    int (* volatile #{n}p)(void)=(int (*)(void))&#{n};\n"}.join("") +
+          refs.map {|n|"    printf(\"%d\", (*#{n}p)());\n"}.join("") +
           "  }\n"
       end
     end

@@ -479,9 +479,7 @@ class Logger
   # device exists, return +nil+.
   #
   def <<(msg)
-    unless @logdev.nil?
-      @logdev.write(msg)
-    end
+    @logdev&.write(msg)
   end
 
   #
@@ -568,7 +566,7 @@ class Logger
   # Close the logging device.
   #
   def close
-    @logdev.close if @logdev
+    @logdev&.close
   end
 
 private
@@ -743,7 +741,7 @@ private
 
     def open_logfile(filename)
       begin
-        open(filename, (File::WRONLY | File::APPEND))
+        File.open(filename, (File::WRONLY | File::APPEND))
       rescue Errno::ENOENT
         create_logfile(filename)
       end
@@ -751,7 +749,7 @@ private
 
     def create_logfile(filename)
       begin
-        logdev = open(filename, (File::WRONLY | File::APPEND | File::CREAT | File::EXCL))
+        logdev = File.open(filename, (File::WRONLY | File::APPEND | File::CREAT | File::EXCL))
         logdev.flock(File::LOCK_EX)
         logdev.sync = true
         add_log_header(logdev)
