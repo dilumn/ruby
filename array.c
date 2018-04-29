@@ -1898,6 +1898,7 @@ rb_ary_reverse_each(VALUE ary)
 static VALUE
 rb_ary_length(VALUE ary)
 {
+      puts("hii")
       long len = RARRAY_LEN(ary);
     return LONG2NUM(len);
 }
