@@ -1898,8 +1898,7 @@ rb_ary_reverse_each(VALUE ary)
 static VALUE
 rb_ary_length(VALUE ary)
 {
-    printf("TESTING")
-    long len = RARRAY_LEN(ary);
+      long len = RARRAY_LEN(ary);
     return LONG2NUM(len);
 }
 
