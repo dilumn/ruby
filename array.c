@@ -916,12 +916,13 @@ ary_take_first_or_last(int argc, const VALUE *argv, VALUE ary, enum ary_take_pos
 VALUE
 rb_ary_push(VALUE ary, VALUE item)
 {
-    long idx = RARRAY_LEN(ary);
-    VALUE target_ary = ary_ensure_room_for_push(ary, 1);
-    RARRAY_PTR_USE(ary, ptr, {
-	RB_OBJ_WRITE(target_ary, &ptr[idx], item);
-    });
-    ARY_SET_LEN(ary, idx + 1);
+ //    print("TESTING 123");
+ //    long idx = RARRAY_LEN(ary);
+ //    VALUE target_ary = ary_ensure_room_for_push(ary, 1);
+ //    RARRAY_PTR_USE(ary, ptr, {
+	// RB_OBJ_WRITE(target_ary, &ptr[idx], item);
+ //    });
+ //    ARY_SET_LEN(ary, idx + 1);
     return ary;
 }
 
